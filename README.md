@@ -53,7 +53,7 @@ Clone the repository:
 ```bash
 git clone https://github.com/m-rathod/claude-subnotes.git
 cd claude-subnotes
-npm install
+bun install
 ```
 
 Enable the plugin (from inside the cloned directory):
@@ -98,7 +98,7 @@ export SUBNOTES_MODE="whisper"           # Default. Or "full" for blocks + messa
 export SUBNOTES_HOME="$HOME"             # Consolidate .subnotes state to ~/.subnotes/
 export SUBNOTES_SDK_TOOLS="read-only"    # Or "full", "off"
 export SUBNOTES_DEBUG="1"                # Enable debug logging
-export ANTHROPIC_MODEL="claude-sonnet-4-5-20250929"  # Model override (optional)
+export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 ```
 
 - `SUBNOTES_MODE` - Controls what gets injected. `whisper` (default, messages only), `full` (blocks + messages), `off` (disable). See [Modes](#modes).
@@ -161,15 +161,16 @@ The plugin uses four Claude Code hooks:
 
 | Hook | Script | Timeout | Purpose |
 |------|--------|---------|---------|
-| `SessionStart` | `session_start.ts` | 5s | Initializes session, cleans up legacy CLAUDE.md |
-| `UserPromptSubmit` | `sync_local_memory.ts` | 10s | Injects memory + messages via stdout |
-| `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow updates via `additionalContext` |
-| `Stop` | `send_messages_to_local.ts` | 120s | Spawns worker to send transcript (async) |
+| `SessionStart` | `session_start.ts` | 5s | Initializes session, starts continuous worker |
+| `UserPromptSubmit` | `stream_transcript.ts` + `sync_local_memory.ts` | 3s + 10s | Streams user input + injects memory/messages |
+| `PostToolUse` | `stream_transcript.ts` | 3s | Streams tool events to the continuous worker |
+| `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow hidden whispers via `additionalContext` |
 
 ### SessionStart
 
 When a new Claude Code session begins:
 - Initializes local memory blocks (loads from `.subnotes/memory.json`)
+- Starts a detached continuous worker for this session
 - Cleans up any legacy `<letta>` or `<subnotes>` content from CLAUDE.md
 - Saves session state for other hooks to reference
 - Displays startup banner with configuration
@@ -177,6 +178,7 @@ When a new Claude Code session begins:
 ### UserPromptSubmit
 
 Before each prompt is processed:
+- Streams the prompt to the continuous transcript queue
 - Loads agent's current memory blocks and messages
 - In `full` mode: injects all blocks on first prompt, diffs on subsequent prompts
 - In `whisper` mode: injects only messages from SubNotes
@@ -185,8 +187,14 @@ Before each prompt is processed:
 
 Before each tool use:
 - Checks for memory changes since last sync
-- If updates found, injects them via `additionalContext`
+- Injects changed memory blocks and any unread SubNotes messages via `additionalContext`
 - Silent no-op if nothing changed
+
+### PostToolUse
+
+After each tool call:
+- Streams tool execution metadata/results into transcript queue
+- Enables SubNotes to reason between tool calls, not only between prompts
 
 ### SDK Tools
 
@@ -196,29 +204,17 @@ SubNotes has access to tools during transcript processing:
 
 | Mode | Tools Available | Use Case |
 |------|----------------|----------|
-| `read-only` (default) | `read_file` | Safe file reading only |
-| `full` | `read_file` + future tools | Reserved for future expansion |
+| `read-only` (default) | `Read`, `Grep`, `Glob`, `web_search`, `fetch_webpage` | Safe file reading and searching only |
+| `full` | All tools including `Read`, `Grep`, `Glob` + future tools | Reserved for future expansion |
 | `off` | None (memory-only) | Listen-only — SubNotes processes transcripts but can't read files |
 
-### Stop
+### Continuous Worker
 
-Uses an **async hook** pattern — runs in the background without blocking Claude Code:
-
-1. Main hook (`send_messages_to_local.ts`) runs quickly:
-   - Parses the session transcript (JSONL format)
-   - Extracts user messages, assistant responses, thinking blocks, and tool usage
-   - Writes payload to a temp file
-   - Spawns detached background worker
-   - Exits immediately
-
-2. Background worker (`send_worker_local.ts`) runs independently:
-   - Uses Anthropic SDK to run a Claude agent
-   - Agent processes the transcript and can read files
-   - Updates memory blocks via tool calls (`memory_replace`, `memory_insert`, `memory_rethink`)
-   - Updates state on success
-   - Cleans up temp file
-
-The Stop hook runs as an async hook, so it never blocks Claude Code.
+SubNotes now runs as a single continuous execution model:
+- Session start spawns one worker per session (`send_worker_continuous.ts`)
+- Worker consumes streamed transcript events (`UserPromptSubmit` + `PostToolUse`)
+- Worker updates memory blocks and queues SubNotes whispers in near real-time
+- `PreToolUse` injects the freshest state back into Claude before each tool call
 
 ## State Management
 
@@ -226,18 +222,18 @@ The plugin stores state in two locations:
 
 ### Durable State (`.subnotes/`)
 
-Persisted in your project directory (or `$SUBNOTES_HOME/.subnotes/` if set):
+Persisted in your project directory (or `$SUBNOTES_HOME/.subnotes/{repoHash}/` if set):
 - `memory.json` - Memory blocks storage
 - `agent_messages.json` - Messages from SubNotes to Claude Code
-- `session-{id}.json` - Per-session state (last processed index)
+- `session-{repoHash}-{id}.json` - Per-session state (last processed index)
+- Session/transcript files are namespaced by a repo hash to avoid collisions across repos when sharing `SUBNOTES_HOME`
 
 ### Temporary State (`$TMPDIR/subnotes-sync-$UID/`)
 
 Log files for debugging:
 - `session_start.log` - Session initialization
 - `sync_local_memory.log` - Memory sync operations
-- `send_messages_local.log` - Main Stop hook
-- `send_worker_local.log` - Background worker
+- `send_worker_continuous.log` - Continuous background worker
 
 ## What SubNotes Receives
 
@@ -314,16 +310,18 @@ Check the log files if hooks aren't working. The log directory is user-specific 
 tail -f /tmp/subnotes-sync-$(id -u)/*.log
 
 # Or specific logs
-tail -f /tmp/subnotes-sync-$(id -u)/send_messages_local.log
-tail -f /tmp/subnotes-sync-$(id -u)/send_worker_local.log
+tail -f /tmp/subnotes-sync-$(id -u)/session_start.log
+tail -f /tmp/subnotes-sync-$(id -u)/send_worker_continuous.log
 ```
 
 ## Architecture Notes
 
 - Memory stored in local JSON files (`.subnotes/memory.json`)
 - Agent powered by Anthropic SDK (`@anthropic-ai/sdk`)
-- Background worker runs asynchronously without blocking Claude Code
+- Continuous worker runs detached and processes transcript events in real-time
 - Memory updates via tool calls: `memory_replace`, `memory_insert`, `memory_rethink`
+
+For a comprehensive technical overview of the system design, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## License
 

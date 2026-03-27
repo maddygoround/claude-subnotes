@@ -234,7 +234,7 @@ export async function runAgentLoop(
 
     try {
       const response = await client.messages.create({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: maxTokens,
         system: systemPromptBuilder(),
         tools,

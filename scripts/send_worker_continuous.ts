@@ -20,8 +20,9 @@ import {
   loadLocalMemory,
   saveLocalMemory,
   MemoryBlock,
-  getDurableStateDir,
   getTempStateDir,
+  getContinuousTranscriptPath,
+  getContinuousWorkerPidFile,
 } from './conversation_utils.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
@@ -36,7 +37,7 @@ interface ContinuousPayload {
 
 interface TranscriptEntry {
   timestamp: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
@@ -54,10 +55,6 @@ process.on('SIGINT', () => {
 // ============================================
 // Transcript Reading
 // ============================================
-
-function getTranscriptPath(cwd: string, sessionId: string): string {
-  return path.join(getDurableStateDir(cwd), `transcript-${sessionId}.jsonl`);
-}
 
 function readNewTranscriptEntries(
   transcriptPath: string,
@@ -87,7 +84,11 @@ function formatTranscriptForAgent(entries: TranscriptEntry[]): string {
 
   const messages = entries
     .map((entry, idx) => {
-      const role = entry.role === 'user' ? 'User' : 'Claude Code';
+      const role = entry.role === 'user'
+        ? 'User'
+        : entry.role === 'assistant'
+          ? 'Claude Code'
+          : 'System';
       return `<message index="${idx}" role="${role}" timestamp="${entry.timestamp}">\n${entry.content}\n</message>`;
     })
     .join('\n\n');
@@ -99,18 +100,18 @@ function formatTranscriptForAgent(entries: TranscriptEntry[]): string {
 // PID Management
 // ============================================
 
-function getPidFilePath(sessionId: string): string {
-  return path.join(TEMP_STATE_DIR, `continuous-worker-${sessionId}.pid`);
+function getPidFilePath(sessionId: string, cwd: string): string {
+  return getContinuousWorkerPidFile(sessionId, cwd);
 }
 
-function writePidFile(sessionId: string): void {
-  const pidFile = getPidFilePath(sessionId);
+function writePidFile(sessionId: string, cwd: string): void {
+  const pidFile = getPidFilePath(sessionId, cwd);
   fs.writeFileSync(pidFile, process.pid.toString());
   log(`Wrote PID file: ${pidFile} (PID: ${process.pid})`);
 }
 
-function cleanupPidFile(sessionId: string): void {
-  const pidFile = getPidFilePath(sessionId);
+function cleanupPidFile(sessionId: string, cwd: string): void {
+  const pidFile = getPidFilePath(sessionId, cwd);
   if (fs.existsSync(pidFile)) {
     fs.unlinkSync(pidFile);
     log(`Cleaned up PID file: ${pidFile}`);
@@ -146,7 +147,10 @@ Your current memory blocks:
 // ============================================
 
 async function continuousLoop(payload: ContinuousPayload): Promise<void> {
-  const transcriptPath = getTranscriptPath(payload.cwd, payload.sessionId);
+  const transcriptPath = getContinuousTranscriptPath(
+    payload.cwd,
+    payload.sessionId,
+  );
   let lastProcessedIndex = -1;
 
   const checkInterval = parseInt(
@@ -154,7 +158,7 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
     10,
   );
   const minMessages = parseInt(
-    process.env.SUBNOTES_MIN_MESSAGES || '2',
+    process.env.SUBNOTES_MIN_MESSAGES || '1',
     10,
   );
 
@@ -247,10 +251,10 @@ async function main(): Promise<void> {
     log(`Loaded payload for session ${payload.sessionId}`);
 
     // Write PID file for process management
-    writePidFile(payload.sessionId);
+    writePidFile(payload.sessionId, payload.cwd);
 
     // Ensure cleanup on exit
-    process.on('exit', () => cleanupPidFile(payload.sessionId));
+    process.on('exit', () => cleanupPidFile(payload.sessionId, payload.cwd));
 
     // Start continuous processing
     await continuousLoop(payload);

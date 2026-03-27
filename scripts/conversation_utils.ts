@@ -1,12 +1,13 @@
 /**
  * Shared conversation and state management utilities
- * Used by sync_local_memory.ts, send_messages_to_local.ts, and session_start.ts
+ * Used by hook scripts and background workers.
  */
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 
 // ESM-compatible __dirname
@@ -27,7 +28,6 @@ const SUBNOTES_MEMORY_END = '</subnotes_memory_blocks>';
 // ============================================
 
 export type SubNotesMode = 'whisper' | 'full' | 'off';
-export type UpdateMode = 'continuous' | 'on-stop';
 
 /**
  * Get the current operating mode.
@@ -36,35 +36,6 @@ export function getMode(): SubNotesMode {
   const mode = process.env.SUBNOTES_MODE?.toLowerCase();
   if (mode === 'full' || mode === 'off') return mode;
   return 'whisper';
-}
-
-/**
- * Get the current update mode (continuous vs on-stop).
- * Reads from config file first, then falls back to environment variable.
- */
-export function getUpdateMode(cwd?: string): UpdateMode {
-  const workingDir = cwd || process.cwd();
-  const configPath = path.join(getDurableStateDir(workingDir), 'config.json');
-
-  // Try config file first
-  if (fs.existsSync(configPath)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      if (config.updateMode === 'continuous' || config.updateMode === 'on-stop') {
-        return config.updateMode;
-      }
-    } catch (e) {
-      // Fall through to env var
-    }
-  }
-
-  // Fall back to environment variable
-  const envMode = process.env.SUBNOTES_UPDATE_MODE;
-  if (envMode === 'continuous') {
-    return 'continuous';
-  }
-
-  return 'on-stop';
 }
 
 /**
@@ -82,8 +53,8 @@ export function ensureConfigFile(cwd: string, log: LogFn = noopLog): void {
 
   // Create default config using current environment defaults
   const defaultConfig = {
-    updateMode: getUpdateMode(cwd),
     sdkToolsMode: getSdkToolsMode(),
+    architecture: 'continuous',
   };
 
   ensureDurableStateDir(cwd);
@@ -134,13 +105,46 @@ export interface MemoryBlock {
 export type LogFn = (message: string) => void;
 const noopLog: LogFn = () => {};
 
-export function getDurableStateDir(cwd: string): string {
-  const base = process.env.SUBNOTES_HOME || cwd;
+function getCanonicalRepoPath(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  try {
+    const realPath = fs.realpathSync.native
+      ? fs.realpathSync.native(resolved)
+      : fs.realpathSync(resolved);
+    return process.platform === 'win32' ? realPath.toLowerCase() : realPath;
+  } catch {
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  }
+}
+
+export function getRepoNamespace(cwd: string): string {
+  const canonicalRepoPath = getCanonicalRepoPath(cwd);
+  return createHash('sha1').update(canonicalRepoPath).digest('hex').slice(0, 12);
+}
+
+function getLegacySharedStateDir(cwd: string): string {
+  const sharedHome = process.env.SUBNOTES_HOME;
+  const base = sharedHome || cwd;
   return path.join(base, '.subnotes');
 }
 
+export function getDurableStateDir(cwd: string): string {
+  const sharedHome = process.env.SUBNOTES_HOME;
+  if (!sharedHome) {
+    return path.join(cwd, '.subnotes');
+  }
+
+  const namespace = getRepoNamespace(cwd);
+  return path.join(sharedHome, '.subnotes', namespace);
+}
+
 export function getSyncStateFile(cwd: string, sessionId: string): string {
-  return path.join(getDurableStateDir(cwd), `session-${sessionId}.json`);
+  const namespace = getRepoNamespace(cwd);
+  return path.join(getDurableStateDir(cwd), `session-${namespace}-${sessionId}.json`);
+}
+
+function getLegacySyncStateFile(cwd: string, sessionId: string): string {
+  return path.join(getLegacySharedStateDir(cwd), `session-${sessionId}.json`);
 }
 
 export function getMemoryFile(cwd: string): string {
@@ -155,8 +159,15 @@ export function ensureDurableStateDir(cwd: string): void {
 }
 
 export function loadSyncState(cwd: string, sessionId: string, log: LogFn = noopLog): SyncState {
-  const statePath = getSyncStateFile(cwd, sessionId);
-  if (fs.existsSync(statePath)) {
+  const statePaths = [
+    getSyncStateFile(cwd, sessionId),
+    getLegacySyncStateFile(cwd, sessionId),
+  ];
+
+  for (const statePath of statePaths) {
+    if (!fs.existsSync(statePath)) {
+      continue;
+    }
     try {
       const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
       log(`Loaded state: lastProcessedIndex=${state.lastProcessedIndex}`);
@@ -165,6 +176,7 @@ export function loadSyncState(cwd: string, sessionId: string, log: LogFn = noopL
       log(`Failed to load state: ${e}`);
     }
   }
+
   log(`No existing state, starting fresh`);
   return { lastProcessedIndex: -1, sessionId };
 }
@@ -477,7 +489,17 @@ export interface TranscriptEntry {
  * Get the continuous transcript file path
  */
 export function getContinuousTranscriptPath(cwd: string, sessionId: string): string {
-  return path.join(getDurableStateDir(cwd), `transcript-${sessionId}.jsonl`);
+  const namespace = getRepoNamespace(cwd);
+  return path.join(getDurableStateDir(cwd), `transcript-${namespace}-${sessionId}.jsonl`);
+}
+
+export function getContinuousWorkerPidFile(sessionId: string, cwd: string): string {
+  const namespace = getRepoNamespace(cwd);
+  return path.join(getTempStateDir(), `continuous-worker-${namespace}-${sessionId}.pid`);
+}
+
+function getLegacyContinuousWorkerPidFile(sessionId: string): string {
+  return path.join(getTempStateDir(), `continuous-worker-${sessionId}.pid`);
 }
 
 /**
@@ -503,23 +525,29 @@ export function appendTranscriptEntry(
 /**
  * Check if continuous agent is running for a session
  */
-export function isContinuousAgentRunning(sessionId: string): boolean {
-  const pidFile = path.join(getTempStateDir(), `continuous-worker-${sessionId}.pid`);
+export function isContinuousAgentRunning(sessionId: string, cwd: string): boolean {
+  const pidFiles = [
+    getContinuousWorkerPidFile(sessionId, cwd),
+    getLegacyContinuousWorkerPidFile(sessionId),
+  ];
 
-  if (!fs.existsSync(pidFile)) {
-    return false;
+  for (const pidFile of pidFiles) {
+    if (!fs.existsSync(pidFile)) {
+      continue;
+    }
+
+    try {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+
+      // Check if process is actually running
+      process.kill(pid, 0); // Signal 0 checks if process exists without killing it
+      return true;
+    } catch (error) {
+      // Process doesn't exist or permission error; continue checking others.
+    }
   }
 
-  try {
-    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-
-    // Check if process is actually running
-    process.kill(pid, 0); // Signal 0 checks if process exists without killing it
-    return true;
-  } catch (error) {
-    // Process doesn't exist or permission error
-    return false;
-  }
+  return false;
 }
 
 /**
@@ -531,7 +559,7 @@ export function ensureContinuousWorker(
   sdkToolsMode: 'read-only' | 'full' | 'off'
 ): ChildProcess | null {
   // Check if already running
-  if (isContinuousAgentRunning(sessionId)) {
+  if (isContinuousAgentRunning(sessionId, cwd)) {
     return null;
   }
 
@@ -547,7 +575,8 @@ export function ensureContinuousWorker(
     fs.mkdirSync(tempDir, { recursive: true });
   }
 
-  const payloadFile = path.join(tempDir, `continuous-payload-${sessionId}.json`);
+  const namespace = getRepoNamespace(cwd);
+  const payloadFile = path.join(tempDir, `continuous-payload-${namespace}-${sessionId}.json`);
   fs.writeFileSync(payloadFile, JSON.stringify(payload));
 
   const workerScript = path.join(__dirname, 'send_worker_continuous.ts');
