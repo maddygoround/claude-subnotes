@@ -1,0 +1,42 @@
+{
+  "name": "claude-subnotes",
+  "version": "2.0.2",
+  "description": "Claude's SubNotes - A persistent memory agent for Claude Code. Watches your sessions, learns your patterns, and whispers guidance back.",
+  "author": "m.rathod",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m-rathod/claude-subnotes.git"
+  },
+  "homepage": "https://github.com/m-rathod/claude-subnotes#readme",
+  "bugs": {
+    "url": "https://github.com/m-rathod/claude-subnotes/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "subnotes",
+    "memory",
+    "persistent-memory",
+    "background-agent"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "sync": "tsx scripts/sync_local_memory.ts",
+    "send": "tsx scripts/send_messages_to_local.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^3.0.0"
+  }
+}

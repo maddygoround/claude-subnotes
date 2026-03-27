@@ -1,0 +1,20 @@
+{
+  "name": "claude-subnotes",
+  "version": "2.0.2",
+  "description": "Claude's SubNotes - A persistent memory agent for Claude Code. Watches your sessions, learns your patterns, and whispers guidance back.",
+  "author": {
+    "name": "m.rathod",
+    "url": "https://github.com/m-rathod"
+  },
+  "homepage": "https://github.com/m-rathod/claude-subnotes",
+  "repository": "https://github.com/m-rathod/claude-subnotes",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "subnotes",
+    "memory",
+    "persistent-memory",
+    "background-agent",
+    "local"
+  ]
+}

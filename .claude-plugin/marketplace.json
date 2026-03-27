@@ -1,0 +1,13 @@
+{
+  "name": "claude-subnotes",
+  "owner": {
+    "name": "m.rathod",
+    "url": "https://github.com/m-rathod"
+  },
+  "plugins": [
+    {
+      "name": "claude-subnotes",
+      "source": "./"
+    }
+  ]
+}
