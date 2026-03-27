@@ -26,7 +26,7 @@
   },
   "scripts": {
     "sync": "tsx scripts/sync_local_memory.ts",
-    "send": "tsx scripts/send_messages_to_local.ts",
+    "continuous:config": "tsx scripts/toggle_mode.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

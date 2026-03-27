@@ -9,7 +9,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getDurableStateDir } from '../conversation_utils.js';
+import { getDurableStateDir, escapeXmlContent } from '../conversation_utils.js';
 import type { LogFn } from './hook-io.js';
 
 // ============================================
@@ -104,17 +104,25 @@ export function fetchUnreadAgentMessages(
  * Format agent messages as XML for hook stdout injection.
  */
 export function formatMessagesForStdout(messages: AgentMessage[]): string {
-  const agentName = 'SubNotes';
-
   if (messages.length === 0) {
-    return `<!-- No new messages from ${agentName} -->`;
+    return `<!-- No new messages from SubNotes -->`;
   }
 
+  return formatMessagesForHookContext(messages);
+}
+
+/**
+ * Format agent messages as XML for hook context injection.
+ * Unlike stdout formatter, this never emits an empty placeholder comment.
+ */
+export function formatMessagesForHookContext(messages: AgentMessage[]): string {
   const formattedMessages = messages.map((msg, index) => {
     const timestamp = msg.date || 'unknown';
-    const msgNum =
-      messages.length > 1 ? ` (${index + 1}/${messages.length})` : '';
-    return `<subnotes_message from="${agentName}"${msgNum} timestamp="${timestamp}">\n${msg.text}\n</subnotes_message>`;
+    const escapedText = escapeXmlContent(msg.text || '');
+    const sequenceAttr = messages.length > 1
+      ? ` sequence="${index + 1}/${messages.length}"`
+      : '';
+    return `<subnotes_message from="SubNotes"${sequenceAttr} timestamp="${timestamp}">\n${escapedText}\n</subnotes_message>`;
   });
 
   return formattedMessages.join('\n\n');

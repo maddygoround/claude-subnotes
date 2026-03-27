@@ -9,9 +9,12 @@
 import {
   readHookInput,
   createDebugLogger,
+  openTty,
   detectChangedBlocks,
   formatChangedBlocksAsXml,
   snapshotBlockValues,
+  fetchUnreadAgentMessages,
+  formatMessagesForHookContext,
 } from './framework/index.js';
 import {
   loadSyncState,
@@ -56,26 +59,44 @@ async function main(): Promise<void> {
     // Load local memory and detect changes
     const blocks = loadLocalMemory(hookInput.cwd, debug);
     const changedBlocks = detectChangedBlocks(blocks, state.lastBlockValues);
+    const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
 
     debug(`Changed blocks: ${changedBlocks.length}`);
+    debug(`Unread messages: ${unreadMessages.length}`);
 
-    if (changedBlocks.length === 0) {
-      debug('No updates, exiting silently');
+    if (changedBlocks.length === 0 && unreadMessages.length === 0) {
+      debug('No updates or messages, exiting silently');
       process.exit(0);
     }
 
-    // Format output (without the comment header — pretool uses compact format)
-    const additionalContext = formatChangedBlocksAsXml(
-      changedBlocks,
-      state.lastBlockValues,
-      false,
-    );
+    const updateSections: string[] = [];
+
+    if (changedBlocks.length > 0) {
+      // Format output (without the comment header — pretool uses compact format)
+      const memoryUpdate = formatChangedBlocksAsXml(
+        changedBlocks,
+        state.lastBlockValues,
+        false,
+      );
+      updateSections.push(memoryUpdate);
+    }
+
+    if (unreadMessages.length > 0) {
+      const whisperUpdate =
+        `<subnotes_message_update>\n` +
+        `${formatMessagesForHookContext(unreadMessages)}\n` +
+        `</subnotes_message_update>`;
+      updateSections.push(whisperUpdate);
+    }
 
     // Update state
     state.lastBlockValues = snapshotBlockValues(blocks);
     saveSyncState(hookInput.cwd, state);
 
-    const contextWithInstruction = `<subnotes_update>\n${additionalContext}\n</subnotes_update>`;
+    const contextWithInstruction =
+      `<subnotes_update>\n` +
+      `${updateSections.join('\n\n')}\n` +
+      `</subnotes_update>`;
 
     const output: Record<string, unknown> = {
       hookSpecificOutput: {
@@ -83,6 +104,17 @@ async function main(): Promise<void> {
         additionalContext: contextWithInstruction,
       },
     };
+
+    const tty = openTty();
+    const parts: string[] = [];
+    if (changedBlocks.length > 0) {
+      parts.push(`${changedBlocks.length} memory update${changedBlocks.length === 1 ? '' : 's'}`);
+    }
+    if (unreadMessages.length > 0) {
+      parts.push(`${unreadMessages.length} whisper${unreadMessages.length === 1 ? '' : 's'}`);
+    }
+    tty.write(`\x1b[2mSubNotes injected before tool call: ${parts.join(' + ')}\x1b[0m\n`);
+    tty.close();
 
     console.log(JSON.stringify(output));
   } catch (error) {

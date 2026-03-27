@@ -12,7 +12,8 @@ import {
   appendTranscriptEntry,
   TranscriptEntry,
   getMode,
-  getUpdateMode,
+  getSdkToolsMode,
+  ensureContinuousWorker,
 } from './conversation_utils.js';
 
 interface StreamHookInput {
@@ -20,7 +21,21 @@ interface StreamHookInput {
   cwd: string;
   prompt?: string;
   response?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
   hook_event_name?: string;
+}
+
+function safeStringify(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 async function main(): Promise<void> {
@@ -29,29 +44,48 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Only run in continuous mode
   const hookInput = await readHookInput<StreamHookInput>();
-  const cwd = hookInput?.cwd || process.cwd();
-  const updateMode = getUpdateMode(cwd);
-  if (updateMode !== 'continuous') {
-    process.exit(0);
-  }
 
   try {
     if (!hookInput?.session_id || !hookInput?.cwd) {
       process.exit(0);
     }
 
-    // Determine role and content based on hook event
+    // Auto-heal: keep a worker running for this session even if it exited unexpectedly.
+    ensureContinuousWorker(
+      hookInput.session_id,
+      hookInput.cwd,
+      getSdkToolsMode(),
+    );
+
+    const eventName = hookInput.hook_event_name || 'Unknown';
     let role: 'user' | 'assistant' | 'system' = 'user';
     let content = '';
 
-    if (hookInput.prompt) {
+    if (eventName === 'UserPromptSubmit' && hookInput.prompt) {
       role = 'user';
       content = hookInput.prompt;
+    } else if (eventName === 'PostToolUse') {
+      role = 'system';
+      const toolName = hookInput.tool_name || 'unknown_tool';
+      const toolInput = hookInput.tool_input !== undefined
+        ? safeStringify(hookInput.tool_input)
+        : '(no tool input)';
+      const toolResponse = hookInput.tool_response !== undefined
+        ? safeStringify(hookInput.tool_response)
+        : '(no tool response)';
+      content =
+        `<tool_event>\n` +
+        `<name>${toolName}</name>\n` +
+        `<input>\n${toolInput}\n</input>\n` +
+        `<response>\n${toolResponse}\n</response>\n` +
+        `</tool_event>`;
     } else if (hookInput.response) {
       role = 'assistant';
       content = hookInput.response;
+    } else if (hookInput.prompt) {
+      role = 'user';
+      content = hookInput.prompt;
     } else {
       // No content to stream
       process.exit(0);

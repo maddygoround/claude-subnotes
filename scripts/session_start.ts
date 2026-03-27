@@ -21,12 +21,12 @@ import {
 import {
   cleanSubNotesFromClaudeMd,
   getMode,
-  getUpdateMode,
   getTempStateDir,
   getSdkToolsMode,
   saveSyncState,
   loadLocalMemory,
   ensureConfigFile,
+  ensureContinuousWorker,
 } from './conversation_utils.js';
 
 // Configuration
@@ -91,30 +91,18 @@ async function main(): Promise<void> {
       log,
     );
 
-    // Spawn continuous worker if enabled (Option A: Continuous Updates)
-    const updateMode = getUpdateMode(hookInput.cwd);
-    if (updateMode === 'continuous') {
-      log('Continuous update mode enabled');
-      const sdkTools = getSdkToolsMode();
-
-      // Import the function
-      const { ensureContinuousWorker } = await import(
-        './conversation_utils.js'
-      );
-
-      const worker = ensureContinuousWorker(
-        hookInput.session_id,
-        hookInput.cwd,
-        sdkTools,
-      );
-      if (worker) {
-        log(`Spawned continuous worker (PID: ${worker.pid})`);
-        tty.write('  \x1b[2mContinuous agent started\x1b[0m\n');
-      } else {
-        log('Continuous worker already running');
-      }
+    // Start the continuous worker (single execution model).
+    const sdkToolsMode = getSdkToolsMode();
+    const worker = ensureContinuousWorker(
+      hookInput.session_id,
+      hookInput.cwd,
+      sdkToolsMode,
+    );
+    if (worker) {
+      log(`Spawned continuous worker (PID: ${worker.pid})`);
+      tty.write('  \x1b[2mContinuous agent started\x1b[0m\n');
     } else {
-      log(`Update mode: ${updateMode} (continuous mode disabled)`);
+      log('Continuous worker already running');
     }
 
     // Clean up any existing <letta> or <subnotes> section from CLAUDE.md

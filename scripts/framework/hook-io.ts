@@ -60,7 +60,7 @@ export async function readHookInput<T extends BaseHookInput>(
 
 /**
  * Blocking stdin reader variant used by hooks that need full stdin
- * (session_start, send_messages_to_local).
+ * (session_start, stop_continuous_worker).
  * Does not use a timeout — waits for stdin EOF.
  */
 export async function readHookInputStrict<T extends BaseHookInput>(): Promise<T> {
