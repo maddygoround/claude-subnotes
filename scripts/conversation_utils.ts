@@ -739,9 +739,9 @@ export function escapeRegex(str: string): string {
 
 function formatContextSection(): string {
   return `${SUBNOTES_CONTEXT_START}
-**Subconscious**
+**Notes**
 
-This is your persistent subconscious layer. It observes conversations asynchronously, updates memory blocks, and surfaces thoughts via <subnotes_message>. You can address it directly — it sees everything and may respond on the next sync.
+This is your persistent notes layer. It observes conversations asynchronously, updates memory blocks, and surfaces thoughts via <subnotes_message>. You can address it directly — it sees everything and may respond on the next sync.
 
 Memory blocks below are the agent's long-term storage. Reference as needed.
 ${SUBNOTES_CONTEXT_END}`;
@@ -862,7 +862,7 @@ export function formatAllBlocksForStdout(blocks: MemoryBlock[]): string {
       : 'It operates in listen-only mode (memory updates only).';
 
   const header = `<subnotes_context>
-Subconscious is active and observing this session.
+Notes agent is active and observing this session.
 ${capabilityLine}
 </subnotes_context>`;
 

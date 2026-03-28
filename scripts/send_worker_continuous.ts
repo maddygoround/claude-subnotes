@@ -255,6 +255,13 @@ function buildSystemPrompt(
     `Tool results may include subconscious signals such as clarification_needed, assumption, risk, and boundary. Use them as internal scaffolding for your reasoning.\n` +
     `Update memory only when it adds durable value.\n` +
     `</runtime_context>\n\n` +
+    `<response_guidelines>\n` +
+    `When you have thoughts or advice for Claude Code, enclose them in one of the following XML tags:\n` +
+    `- <reflect>...</reflect>: Use for general observations, noting patterns, summarizing a successful workflow, or updating memory context. This is the default quiet observation.\n` +
+    `- <steer>...</steer>: Use when Claude is taking a slightly suboptimal path, violating a project convention, or about to make a minor mistake (but isn't completely stuck). Gently nudges Claude onto the right path.\n` +
+    `- <insight>...</insight>: Use ONLY as a high-priority loop breaker when Claude is looping on the same failing error message, entirely misunderstanding the root cause, or pursuing an impossible approach.\n` +
+    `You may emit multiple tags if necessary. Only the contents within these tags will be delivered to Claude.\n` +
+    `</response_guidelines>\n\n` +
     `Your current memory blocks:\n\n`;
 
   for (const block of memoryBlocks) {
@@ -367,8 +374,25 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
         }
 
         if (finalResponse.trim()) {
-          appendAgentMessage(payload.cwd, finalResponse, log);
-          log('✓ Appended agent message');
+          const typeRegex = /<(reflect|steer|insight)>([\s\S]*?)<\/\1>/g;
+          let match;
+          let foundAny = false;
+          
+          while ((match = typeRegex.exec(finalResponse)) !== null) {
+            foundAny = true;
+            const msgType = match[1] as 'reflect' | 'steer' | 'insight';
+            const msgContent = match[2].trim();
+            if (msgContent) {
+              appendAgentMessage(payload.cwd, msgContent, log, msgType);
+              log(`✓ Appended agent message of type <${msgType}>`);
+            }
+          }
+          
+          // Fallback if the agent ignores the prompt instructions and just dumps plain text
+          if (!foundAny && finalResponse.trim()) {
+            appendAgentMessage(payload.cwd, finalResponse.trim(), log, 'reflect');
+            log('✓ Appended fallback agent message (no tags found)');
+          }
         }
 
         lastProcessedIndex = latestIndex;

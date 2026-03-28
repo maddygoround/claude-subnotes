@@ -253,7 +253,7 @@ The plugin stores state in two locations:
 
 Persisted in your project directory (or `$SUBNOTES_HOME/.subnotes/{repoHash}/` if set):
 - `memory.json` - Memory blocks storage
-- `agent_messages.json` - Messages from SubNotes to Claude Code
+- `conversation.json` - Messages from SubNotes to Claude Code
 - `session-{repoHash}-{id}.json` - Per-session state (last processed index)
 - Session/transcript files are namespaced by a repo hash to avoid collisions across repos when sharing `SUBNOTES_HOME`
 - If `Subconscious.af` exists in repo root, SubNotes uses it as the template source for system prompt + default/required memory block structure

@@ -27,7 +27,9 @@ export {
   fetchUnreadAgentMessages,
   formatMessagesForStdout,
   formatMessagesForHookContext,
+  generateForegroundInstruction,
   type AgentMessage,
+  type AgentMessageType,
 } from './agent-messages.js';
 
 export {
