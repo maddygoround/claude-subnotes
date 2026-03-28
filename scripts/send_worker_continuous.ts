@@ -2,7 +2,7 @@
 /**
  * Continuous Background Worker - Long-Running Subconscious Agent
  *
- * Unlike send_worker_local.ts (which runs once on Stop), this worker runs
+ * Unlike the legacy one-shot worker pattern, this worker runs
  * continuously throughout the session, watching for new transcript entries
  * and updating memory in real-time.
  *

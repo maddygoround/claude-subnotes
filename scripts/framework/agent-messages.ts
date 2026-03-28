@@ -4,7 +4,7 @@
  * Shared agent message store — read, write, and format
  * messages between the SubNotes agent and Claude Code.
  *
- * Used by send_worker_local, send_worker_continuous, and sync_local_memory.
+ * Used by send_worker_continuous and sync_local_memory.
  */
 
 import * as fs from 'fs';

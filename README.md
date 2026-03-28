@@ -42,6 +42,10 @@ After each response, the transcript is sent to a local Claude agent via the Anth
        │   After each response  │
        ├───────────────────────►│ Transcript → Agent (async)
        │                        │  ↳ Reads files, updates memory
+       │                        │  ↳ May self-continue up to 2x
+       │   Before stop          │
+       │◄───────────────────────┤ Blocks stop if unread messages
+       │                        │  ↳ Injects message, then stops
 ```
 
 ## Installation
@@ -99,6 +103,7 @@ export SUBNOTES_HOME="$HOME"             # Consolidate .subnotes state to ~/.sub
 export SUBNOTES_SDK_TOOLS="read-only"    # Or "full", "off"
 export SUBNOTES_DEBUG="1"                # Enable debug logging
 export SUBNOTES_IDLE_TIMEOUT="1800000"   # Optional: worker idle self-shutdown in ms (0 disables)
+export SUBNOTES_MAX_CONTINUATIONS="2"        # Max self-continuations per cycle (default: 2)
 export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 ```
 
@@ -107,7 +112,8 @@ export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 - `SUBNOTES_SDK_TOOLS` - Controls client-side tool access for the SubNotes agent. `read-only` (default), `full`, or `off`. See [SDK Tools](#sdk-tools).
 - `SUBNOTES_DEBUG` - Set to `1` to enable debug logging.
 - `SUBNOTES_IDLE_TIMEOUT` - Optional idle timeout in milliseconds for the detached worker. Default `1800000` (30 min). Set to `0` to disable idle self-termination.
-- `ANTHROPIC_MODEL` - Override the Claude model. Defaults to `claude-sonnet-4-5-20250929`.
+- `SUBNOTES_MAX_CONTINUATIONS` - Max self-continuation cycles the agent can run per transcript batch. Default `2`.
+- `ANTHROPIC_MODEL` - Override the Claude model. Defaults to `claude-sonnet-4-6`.
 
 ### Modes
 
@@ -167,6 +173,7 @@ The plugin uses five Claude Code hooks:
 | `UserPromptSubmit` | `stream_transcript.ts` + `sync_local_memory.ts` | 3s + 10s | Streams user input + injects memory/messages |
 | `PostToolUse` | `stream_transcript.ts` | 3s | Streams tool events to the continuous worker |
 | `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow hidden whispers via `additionalContext` |
+| `Stop` | `stop_sync.ts` | 5s | Blocks stop if SubNotes has unread messages; injects them |
 | `SessionEnd` | `stop_continuous_worker.ts` | 5s | Stops the session worker and cleans up PID files |
 
 ### SessionStart
@@ -199,6 +206,14 @@ After each tool call:
 - Streams tool execution metadata/results into transcript queue
 - Enables SubNotes to reason between tool calls, not only between prompts
 
+### Stop
+
+When Claude is about to stop responding:
+- Checks if the SubNotes agent has posted any unread messages
+- If unread messages exist, blocks the stop and injects them into the conversation — Claude renders the thought as `**Subconscious thought** — [key point]` and continues
+- Once all messages are marked read, exits silently and Claude stops normally
+- Errors exit with code 0 (never disrupts the stop flow)
+
 ### SessionEnd
 
 When a Claude Code session ends:
@@ -220,12 +235,15 @@ SubNotes has access to tools during transcript processing:
 
 ### Continuous Worker
 
-SubNotes now runs as a single continuous execution model:
+SubNotes runs as a single continuous execution model:
 - Session start spawns one worker per session (`send_worker_continuous.ts`)
 - Worker consumes streamed transcript events (`UserPromptSubmit` + `PostToolUse`)
 - Worker updates memory blocks and queues SubNotes whispers in near real-time
 - `PreToolUse` injects the freshest state back into Claude before each tool call
+- `Stop` delivers any queued messages before Claude stops responding
 - `SessionEnd` shuts down the session worker; idle workers also self-terminate (default: 30 minutes without transcript changes)
+
+**Self-continuing thoughts:** The agent can emit `<continue_thought>your follow-up here</continue_thought>` in its response to re-invoke itself with a follow-up question, up to 2 times per cycle. This lets it resolve multi-step reasoning (e.g. "I noticed X — let me check if Y is also true") without waiting for the next transcript event. The tag is stripped from the final message before delivery.
 
 ## State Management
 
