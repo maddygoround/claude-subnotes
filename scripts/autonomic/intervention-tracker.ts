@@ -15,6 +15,7 @@ import type {
   LogFn,
 } from './types.js';
 import { generateId } from './types.js';
+import { ReflectConfig } from '../conversation_utils.js';
 
 const noopLog: LogFn = () => {};
 
@@ -61,13 +62,13 @@ export function createInterventionRecord(
 // ============================================
 
 /**
- * Determine the outcome of a whisper intervention.
+ * Determine the outcome of an advisory intervention.
  *
- * A whisper is "followed" if Claude's next action aligns with the advice.
+ * An advisory is "followed" if Claude's next action aligns with the advice.
  * It's "ignored" if Claude does exactly what was warned about.
  * It's "acknowledged" if Claude explicitly references the warning.
  */
-function resolveWhisperOutcome(
+function resolveAdvisoryOutcome(
   intervention: InterventionRecord,
   subsequentEntries: TranscriptEntry[],
 ): InterventionOutcome | null {
@@ -82,6 +83,7 @@ function resolveWhisperOutcome(
         content.includes('noted') ||
         content.includes('good point') ||
         content.includes('taking into account') ||
+        content.includes('insight') ||
         content.includes('sentinel') ||
         content.includes('pattern detected') ||
         content.includes('warning')
@@ -254,8 +256,6 @@ function resolveAskOutcome(
   return null; // Can't determine yet
 }
 
-import { ReflectConfig } from '../conversation_utils.js';
-
 // ================= ===========================
 // Main Outcome Resolution
 // ============================================
@@ -306,8 +306,9 @@ export function resolveOutcomes(
 
     switch (intervention.type) {
       case 'whisper':
+      case 'insight':
       case 'sentinel':
-        outcome = resolveWhisperOutcome(intervention, subsequentEntries);
+        outcome = resolveAdvisoryOutcome(intervention, subsequentEntries);
         break;
       case 'deny':
         outcome = resolveDenyOutcome(intervention, subsequentEntries);

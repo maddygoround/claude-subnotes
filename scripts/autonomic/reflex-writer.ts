@@ -30,13 +30,25 @@ const noopLog: LogFn = () => {};
  * based on its confidence and the current thresholds.
  */
 function determineActionType(
-  confidence: number,
+  pattern: PatternRecord,
   thresholds: MetaConfig['thresholds'],
 ): ReflexAction['type'] | null {
+  const { confidence, suggested_action: suggestedAction } = pattern;
+
   if (confidence >= thresholds.deny) return 'deny';
-  if (confidence >= thresholds.correct) return 'correct';
+  if (
+    suggestedAction.type === 'correct_input' &&
+    confidence >= thresholds.correct &&
+    suggestedAction.field &&
+    suggestedAction.match &&
+    suggestedAction.replacement
+  ) {
+    return 'correct';
+  }
   if (confidence >= thresholds.ask) return 'ask';
-  if (confidence >= thresholds.whisper) return 'whisper';
+  if (confidence >= thresholds.whisper) {
+    return suggestedAction.type === 'insight' ? 'insight' : 'whisper';
+  }
   return null; // Below all thresholds
 }
 
@@ -83,6 +95,12 @@ function buildReflexAction(
         content: base.content || `Pattern detected: "${pattern.name}"`,
       };
 
+    case 'insight':
+      return {
+        type: 'insight',
+        content: base.content || `Insight detected: "${pattern.name}"`,
+      };
+
     case 'whisper':
     default:
       return {
@@ -90,6 +108,25 @@ function buildReflexAction(
         content: base.content || `Pattern detected: "${pattern.name}"`,
       };
   }
+}
+
+function areReflexActionsEqual(a: ReflexAction, b: ReflexAction): boolean {
+  return (
+    a.type === b.type &&
+    a.message === b.message &&
+    a.content === b.content &&
+    a.field === b.field &&
+    a.match === b.match &&
+    a.replacement === b.replacement
+  );
+}
+
+function areReflexTriggersEqual(a: ReflexTrigger, b: ReflexTrigger): boolean {
+  return (
+    a.tool_name === b.tool_name &&
+    a.file_pattern === b.file_pattern &&
+    a.context_condition === b.context_condition
+  );
 }
 
 /**
@@ -129,7 +166,7 @@ export function promotePatterns(
 
   for (const pattern of patterns) {
     const actionType = determineActionType(
-      pattern.confidence,
+      pattern,
       metaConfig.thresholds,
     );
     const existingRuleIdx = rulesByPattern.get(pattern.id);
@@ -156,25 +193,39 @@ export function promotePatterns(
       // Update existing rule
       const existingRule = updatedRules[existingRuleIdx];
       const newAction = buildReflexAction(pattern, actionType);
+      const newTrigger = buildReflexTrigger(pattern);
+      const shouldRefreshRule =
+        !existingRule.active ||
+        !areReflexActionsEqual(existingRule.action, newAction) ||
+        !areReflexTriggersEqual(existingRule.trigger, newTrigger);
 
-      // Only update if the action type changed or was inactive
-      if (existingRule.action.type !== actionType || !existingRule.active) {
+      if (shouldRefreshRule) {
         updatedRules[existingRuleIdx] = {
           ...existingRule,
           active: true,
           action: newAction,
           confidence: pattern.confidence,
-          trigger: buildReflexTrigger(pattern),
+          trigger: newTrigger,
         };
 
-        if (existingRule.action.type !== actionType) {
+        if (existingRule.action.type !== newAction.type) {
           log(
-            `Promoted rule "${existingRule.id}" from ${existingRule.action.type} → ${actionType} ` +
+            `Promoted rule "${existingRule.id}" from ${existingRule.action.type} → ${newAction.type} ` +
+              `(confidence: ${pattern.confidence.toFixed(2)})`,
+          );
+        } else if (!areReflexActionsEqual(existingRule.action, newAction)) {
+          log(
+            `Refreshed rule "${existingRule.id}" ${newAction.type} content ` +
+              `(confidence: ${pattern.confidence.toFixed(2)})`,
+          );
+        } else if (!areReflexTriggersEqual(existingRule.trigger, newTrigger)) {
+          log(
+            `Updated rule "${existingRule.id}" trigger for pattern "${pattern.name}" ` +
               `(confidence: ${pattern.confidence.toFixed(2)})`,
           );
         } else {
           log(
-            `Reactivated rule "${existingRule.id}" as ${actionType} ` +
+            `Reactivated rule "${existingRule.id}" as ${newAction.type} ` +
               `(confidence: ${pattern.confidence.toFixed(2)})`,
           );
         }
@@ -204,7 +255,7 @@ export function promotePatterns(
       updatedRules.push(newRule);
       rulesByPattern.set(pattern.id, updatedRules.length - 1);
       log(
-        `Created new rule "${newRule.id}" as ${actionType} ` +
+        `Created new rule "${newRule.id}" as ${newRule.action.type} ` +
           `for pattern "${pattern.name}" (confidence: ${pattern.confidence.toFixed(2)})`,
       );
     }
