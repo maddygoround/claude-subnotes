@@ -19,6 +19,10 @@ import {
   MemoryBlock,
   getTempStateDir,
 } from './conversation_utils.js';
+import {
+  readJsonFileWithFallback,
+  writeJsonFileAtomic,
+} from './state_store.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'send_worker_local.log');
@@ -39,6 +43,12 @@ interface LocalPayload {
 function buildSystemPrompt(memoryBlocks: MemoryBlock[]): string {
   let prompt =
     "You are Subconscious, a persistent agent that whispers to Claude Code and maintains ongoing memory blocks across sessions.\n\n";
+  prompt +=
+    "You are the subconscious layer, not the foreground assistant. Do not ask the user questions directly and do not invent visible subagents.\n";
+  prompt +=
+    "If clarification is needed, phrase it as a suggestion for Claude Code or carry a fallback assumption.\n";
+  prompt +=
+    "Tool results may include subconscious signals such as clarification_needed, assumption, risk, and boundary. Use them as internal reasoning scaffolding.\n\n";
   prompt += "Your current memory blocks:\n\n";
   for (const block of memoryBlocks) {
     prompt += `<${block.label} description="${block.description}">\n${block.value}\n</${block.label}>\n\n`;
@@ -68,7 +78,8 @@ async function main(): Promise<void> {
     );
     log(`Loaded payload for session ${payload.sessionId}`);
 
-    let memoryBlocks = loadLocalMemory(payload.cwd);
+    let memoryBlocks = loadLocalMemory(payload.cwd, log);
+    const baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
 
     const result = await runAgentLoop(
       {
@@ -84,7 +95,9 @@ async function main(): Promise<void> {
     memoryBlocks = result.memoryBlocks;
 
     if (result.memoriesUpdated) {
-      saveLocalMemory(payload.cwd, memoryBlocks);
+      saveLocalMemory(payload.cwd, memoryBlocks, log, {
+        baseBlocks: baseMemoryBlocks,
+      });
       log('Saved updated memory blocks to disk');
     }
 
@@ -94,12 +107,13 @@ async function main(): Promise<void> {
 
     // Update state file
     if (fs.existsSync(payload.stateFile)) {
-      const state = JSON.parse(fs.readFileSync(payload.stateFile, 'utf-8'));
-      state.lastProcessedIndex = payload.newLastProcessedIndex;
-      fs.writeFileSync(
+      const state = readJsonFileWithFallback<Record<string, unknown>>(
         payload.stateFile,
-        JSON.stringify(state, null, 2),
+        {},
+        log,
       );
+      state.lastProcessedIndex = payload.newLastProcessedIndex;
+      writeJsonFileAtomic(payload.stateFile, state, log);
       log(
         `Updated state: lastProcessedIndex=${payload.newLastProcessedIndex}`,
       );

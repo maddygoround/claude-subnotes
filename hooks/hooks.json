@@ -7,11 +7,13 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start.ts\"",
+            "statusMessage": "Subconsciousness waking up",
             "timeout": 5
           },
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_local_memory.ts\"",
+            "statusMessage": "Reading subconscious thoughts",
             "timeout": 10
           }
         ]
@@ -24,6 +26,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/pretool_sync.ts\"",
+            "statusMessage": "Subconsciousness steering behavior",
             "timeout": 5
           }
         ]
@@ -41,6 +44,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/sync_local_memory.ts\"",
+            "statusMessage": "Reading subconscious thoughts",
             "timeout": 10
           }
         ]
@@ -53,7 +57,21 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/stream_transcript.ts\"",
+            "statusMessage": "Updating subconscious thoughts",
             "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT}/scripts/stop_continuous_worker.ts\"",
+            "statusMessage": "Subconsciousness going quiet",
+            "timeout": 5
           }
         ]
       }

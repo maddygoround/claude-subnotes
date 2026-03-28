@@ -16,7 +16,6 @@ import * as path from 'path';
 import {
   readHookInputStrict,
   createFileLogger,
-  openTty,
 } from './framework/index.js';
 import {
   cleanSubNotesFromClaudeMd,
@@ -51,25 +50,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const tty = openTty();
-
   try {
-    tty.write('\n');
-    tty.write('\x1b[1m  Claude\'s SubNotes\x1b[0m\n');
-    tty.write('\n');
-    tty.write('\x1b[35m'); // Purple
-    tty.write('  ▐\x1b[31m▛\x1b[35m███\x1b[31m▜\x1b[35m▌\n');
-    tty.write(' ▝▜█████▛▘\n');
-    tty.write('   ▘▘ ▝▝\n');
-    tty.write('\x1b[0m'); // Reset
-
-    const sdkTools = process.env.SUBNOTES_SDK_TOOLS || 'read-only';
-
-    tty.write('\n');
-    tty.write(`  Mode:       ${mode}\n`);
-    tty.write(`  SDK Tools:  ${sdkTools}\n`);
-    tty.write('\n');
-
     // Read hook input
     log('Reading hook input from stdin...');
     const hookInput = await readHookInputStrict<SessionStartInput>();
@@ -97,10 +78,10 @@ async function main(): Promise<void> {
       hookInput.session_id,
       hookInput.cwd,
       sdkToolsMode,
+      log,
     );
     if (worker) {
       log(`Spawned continuous worker (PID: ${worker.pid})`);
-      tty.write('  \x1b[2mContinuous agent started\x1b[0m\n');
     } else {
       log('Continuous worker already running');
     }
@@ -116,19 +97,11 @@ async function main(): Promise<void> {
     }
     log('CLAUDE.md cleanup done');
 
-    tty.write('\x1b[2m'); // Dim
-    tty.write('  SubNotes memory initialized locally.\n');
-    tty.write('\x1b[0m'); // Reset
-    tty.write('\n');
-
-    tty.close();
-
     log('Completed successfully');
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     log(`ERROR: ${errorMessage}`);
-    tty.close();
     process.exit(1);
   }
 }

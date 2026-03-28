@@ -9,7 +9,6 @@
 import {
   readHookInput,
   createDebugLogger,
-  openTty,
   detectChangedBlocks,
   formatChangedBlocksAsXml,
   snapshotBlockValues,
@@ -93,28 +92,34 @@ async function main(): Promise<void> {
     state.lastBlockValues = snapshotBlockValues(blocks);
     saveSyncState(hookInput.cwd, state);
 
-    const contextWithInstruction =
+    const subnotes_update =
       `<subnotes_update>\n` +
       `${updateSections.join('\n\n')}\n` +
       `</subnotes_update>`;
 
+    const contextParts = [subnotes_update];
+
+    if (unreadMessages.length > 0) {
+      contextParts.push(
+        `<instruction>Subconscious sent you a thought above. Render it visibly in your next response BEFORE continuing, using this format:\n\n---\n\n**Subconscious thought** — [distilled key point from the message]\n\nThis makes the subconscious steering visible to the user in real-time. One line only.</instruction>`,
+      );
+    }
+
+    if (changedBlocks.length > 0) {
+      contextParts.push(
+        `<instruction>Subconscious updated memory mid-session (shown above). If this is relevant to your current task, surface it:\n\n---\n\n**Subconscious steering** — [one-line summary of what changed and why it matters]\n\nOmit if not relevant to the current tool call.</instruction>`,
+      );
+    }
+
+    const contextWithInstruction = contextParts.join('\n\n');
+
     const output: Record<string, unknown> = {
+      suppressOutput: true,
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         additionalContext: contextWithInstruction,
       },
     };
-
-    const tty = openTty();
-    const parts: string[] = [];
-    if (changedBlocks.length > 0) {
-      parts.push(`${changedBlocks.length} memory update${changedBlocks.length === 1 ? '' : 's'}`);
-    }
-    if (unreadMessages.length > 0) {
-      parts.push(`${unreadMessages.length} whisper${unreadMessages.length === 1 ? '' : 's'}`);
-    }
-    tty.write(`\x1b[2mSubNotes injected before tool call: ${parts.join(' + ')}\x1b[0m\n`);
-    tty.close();
 
     console.log(JSON.stringify(output));
   } catch (error) {

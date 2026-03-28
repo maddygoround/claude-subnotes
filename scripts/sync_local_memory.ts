@@ -13,12 +13,11 @@
 import {
   readHookInput,
   createDebugLogger,
-  openTty,
   detectChangedBlocks,
   formatChangedBlocksAsXml,
   snapshotBlockValues,
   fetchUnreadAgentMessages,
-  formatMessagesForStdout,
+  formatMessagesForHookContext,
 } from './framework/index.js';
 import {
   loadSyncState,
@@ -35,6 +34,7 @@ interface SyncHookInput {
   session_id: string;
   cwd: string;
   prompt?: string;
+  hook_event_name?: 'SessionStart' | 'UserPromptSubmit';
 }
 
 async function main(): Promise<void> {
@@ -66,14 +66,11 @@ async function main(): Promise<void> {
     }
 
     const outputs: string[] = [];
-    let injectedMemory = false;
-
     if (mode === 'full') {
       const isFirstPrompt = !lastBlockValues;
 
       if (isFirstPrompt) {
         outputs.push(formatAllBlocksForStdout(memoryBlocks));
-        injectedMemory = true;
       } else {
         const changedBlocksOutput = formatChangedBlocksAsXml(
           changedBlocks,
@@ -82,30 +79,37 @@ async function main(): Promise<void> {
         );
         if (changedBlocksOutput) {
           outputs.push(changedBlocksOutput);
-          injectedMemory = true;
         }
       }
     }
 
     if (unreadMessages.length > 0) {
-      outputs.push(formatMessagesForStdout(unreadMessages));
+      outputs.push(formatMessagesForHookContext(unreadMessages));
       outputs.push(
-        `<instruction>SubNotes sent you a message above. Briefly acknowledge what SubNotes said - just a short note like "SubNotes: [key point]" so the user knows.</instruction>`,
+        `<instruction>Subconscious sent you a thought above. Render it visibly in your response BEFORE answering, using this format:\n\n---\n\n**Subconscious thought** — [distilled key point from the message]\n\nThis makes the subconscious steering visible to the user in the conversation. Keep it to one line — just the signal, not the full message.</instruction>`,
+      );
+    }
+
+    if (lastBlockValues && changedBlocks.length > 0) {
+      outputs.push(
+        `<instruction>Subconscious updated memory blocks since your last response (shown above). If this affects your answer, acknowledge it:\n\n---\n\n**Subconscious memory updated** — [what changed and why it matters]\n\nOmit if not relevant to the current conversation.</instruction>`,
       );
     }
 
     if (outputs.length > 0) {
-      const tty = openTty();
-      const parts: string[] = [];
-      if (injectedMemory) {
-        parts.push('memory');
-      }
-      if (unreadMessages.length > 0) {
-        parts.push(`${unreadMessages.length} whisper${unreadMessages.length === 1 ? '' : 's'}`);
-      }
-      tty.write(`\x1b[2mSubNotes injected: ${parts.join(' + ')}\x1b[0m\n`);
-      tty.close();
-      console.log(outputs.join('\n\n'));
+      const hookEventName =
+        hookInput?.hook_event_name === 'SessionStart'
+          ? 'SessionStart'
+          : 'UserPromptSubmit';
+      const output: Record<string, unknown> = {
+        suppressOutput: true,
+        hookSpecificOutput: {
+          hookEventName,
+          additionalContext: outputs.join('\n\n'),
+        },
+      };
+
+      console.log(JSON.stringify(output));
     }
 
     if (state && sessionId) {
