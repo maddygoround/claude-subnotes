@@ -16,13 +16,16 @@ import {
   runAgentLoop,
   appendAgentMessage,
 } from './framework/index.js';
+import { withProcessLock } from './state_store.js';
 import {
   loadLocalMemory,
   saveLocalMemory,
   MemoryBlock,
+  SdkToolsMode,
   getTempStateDir,
   getContinuousTranscriptPath,
   getContinuousWorkerPidFile,
+  getSubconsciousSystemPrompt,
 } from './conversation_utils.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
@@ -39,6 +42,11 @@ interface TranscriptEntry {
   timestamp: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+}
+
+interface TranscriptReadResult {
+  newEntries: TranscriptEntry[];
+  latestIndex: number;
 }
 
 // Graceful shutdown handling
@@ -59,13 +67,19 @@ process.on('SIGINT', () => {
 function readNewTranscriptEntries(
   transcriptPath: string,
   lastProcessedIndex: number,
-): TranscriptEntry[] {
+): TranscriptReadResult {
   if (!fs.existsSync(transcriptPath)) {
-    return [];
+    return { newEntries: [], latestIndex: -1 };
   }
 
-  const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n');
+  const content = fs.readFileSync(transcriptPath, 'utf-8').trim();
+  if (!content) {
+    return { newEntries: [], latestIndex: -1 };
+  }
+
+  const lines = content.split('\n');
   const newEntries: TranscriptEntry[] = [];
+  const latestIndex = lines.length - 1;
 
   for (let i = lastProcessedIndex + 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -76,7 +90,7 @@ function readNewTranscriptEntries(
     }
   }
 
-  return newEntries;
+  return { newEntries, latestIndex };
 }
 
 function formatTranscriptForAgent(entries: TranscriptEntry[]): string {
@@ -104,38 +118,125 @@ function getPidFilePath(sessionId: string, cwd: string): string {
   return getContinuousWorkerPidFile(sessionId, cwd);
 }
 
-function writePidFile(sessionId: string, cwd: string): void {
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    return err.code === 'EPERM';
+  }
+}
+
+function readPidFile(pidFile: string): number | null {
+  try {
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    return Number.isNaN(pid) || pid <= 0 ? null : pid;
+  } catch {
+    return null;
+  }
+}
+
+function claimPidFile(sessionId: string, cwd: string): boolean {
   const pidFile = getPidFilePath(sessionId, cwd);
-  fs.writeFileSync(pidFile, process.pid.toString());
-  log(`Wrote PID file: ${pidFile} (PID: ${process.pid})`);
+  return withProcessLock(
+    `${pidFile}.claim.lock`,
+    () => {
+      const existingPid = readPidFile(pidFile);
+      if (existingPid !== null && isProcessRunning(existingPid)) {
+        log(
+          `Another continuous worker already owns ${pidFile} (PID: ${existingPid}), exiting duplicate worker`,
+        );
+        return false;
+      }
+
+      if (fs.existsSync(pidFile)) {
+        try {
+          fs.unlinkSync(pidFile);
+          log(`Removed stale PID file before claiming: ${pidFile}`);
+        } catch (unlinkError) {
+          const unlinkErr = unlinkError as NodeJS.ErrnoException;
+          if (unlinkErr.code !== 'ENOENT') {
+            throw unlinkError;
+          }
+        }
+      }
+
+      fs.writeFileSync(pidFile, `${process.pid}\n`, { flag: 'wx' });
+      log(`Claimed PID file: ${pidFile} (PID: ${process.pid})`);
+      return true;
+    },
+    {
+      log,
+      timeoutMs: 1500,
+      staleMs: 15000,
+    },
+  );
 }
 
 function cleanupPidFile(sessionId: string, cwd: string): void {
   const pidFile = getPidFilePath(sessionId, cwd);
-  if (fs.existsSync(pidFile)) {
-    fs.unlinkSync(pidFile);
-    log(`Cleaned up PID file: ${pidFile}`);
+  if (!fs.existsSync(pidFile)) {
+    return;
   }
+
+  const currentPid = readPidFile(pidFile);
+  if (currentPid === null) {
+    fs.unlinkSync(pidFile);
+    log(`Removed unreadable PID file during cleanup: ${pidFile}`);
+    return;
+  }
+
+  if (currentPid !== process.pid) {
+    log(
+      `Skipping PID cleanup for ${pidFile}; ownership moved to PID ${currentPid}`,
+    );
+    return;
+  }
+
+  fs.unlinkSync(pidFile);
+  log(`Cleaned up PID file: ${pidFile}`);
 }
 
 // ============================================
 // System Prompt
 // ============================================
 
-function buildSystemPrompt(memoryBlocks: MemoryBlock[]): string {
-  let prompt = `You are Subconscious, a continuous agent watching Claude Code sessions in real-time.
+function getSdkToolsCapabilityLine(sdkToolsMode: SdkToolsMode): string {
+  if (sdkToolsMode === 'full') {
+    return 'Tool access mode: full (memory tools + local file reading tools).';
+  }
+  if (sdkToolsMode === 'off') {
+    return 'Tool access mode: off (no file-reading tools; memory tools only).';
+  }
+  return 'Tool access mode: read-only (memory tools + safe local file reading tools).';
+}
 
-You receive incremental transcript updates and maintain memory blocks. Process new messages and update memory when you observe:
-- User preferences or patterns
-- Project context and architecture
-- Pending items or unfinished work
-- Important guidance for Claude Code
+function buildSystemPrompt(
+  memoryBlocks: MemoryBlock[],
+  cwd: string,
+  sdkToolsMode: SdkToolsMode,
+): string {
+  const fallbackSystemPrompt =
+    `You are the Subconscious — a persistent agent that whispers to Claude Code.\n\n` +
+    `You process transcript updates asynchronously. Use memory blocks to track user preferences, session patterns, project context, pending items, and guidance.\n\n` +
+    `Be concise, observational, and useful.`;
 
-Keep updates concise. Only write to guidance when you have something genuinely useful.
+  const basePrompt = getSubconsciousSystemPrompt(cwd, fallbackSystemPrompt, log);
 
-Your current memory blocks:
+  let prompt =
+    `${basePrompt}\n\n` +
+    `<runtime_context>\n` +
+    `You are receiving incremental transcript updates between Claude tool calls and prompts.\n` +
+    `${getSdkToolsCapabilityLine(sdkToolsMode)}\n` +
+    `You are the subconscious layer, not the foreground assistant.\n` +
+    `Do not ask the user questions directly and do not invent visible subagents.\n` +
+    `If clarification is needed, frame it as a suggestion for Claude Code or provide a fallback assumption.\n` +
+    `Tool results may include subconscious signals such as clarification_needed, assumption, risk, and boundary. Use them as internal scaffolding for your reasoning.\n` +
+    `Update memory only when it adds durable value.\n` +
+    `</runtime_context>\n\n` +
+    `Your current memory blocks:\n\n`;
 
-`;
   for (const block of memoryBlocks) {
     prompt += `<${block.label} description="${block.description}">\n${block.value}\n</${block.label}>\n\n`;
   }
@@ -152,6 +253,8 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
     payload.sessionId,
   );
   let lastProcessedIndex = -1;
+  let lastSeenTranscriptIndex = -1;
+  let lastActivityAt = Date.now();
 
   const checkInterval = parseInt(
     process.env.SUBNOTES_CHECK_INTERVAL || '5000',
@@ -161,23 +264,38 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
     process.env.SUBNOTES_MIN_MESSAGES || '1',
     10,
   );
+  const idleTimeoutMs = parseInt(
+    process.env.SUBNOTES_IDLE_TIMEOUT || '1800000',
+    10,
+  );
 
   log('Starting continuous loop...');
   log(`Check interval: ${checkInterval}ms`);
   log(`Min messages before processing: ${minMessages}`);
+  if (idleTimeoutMs > 0) {
+    log(`Idle timeout: ${idleTimeoutMs}ms`);
+  } else {
+    log('Idle timeout: disabled');
+  }
   log(`Transcript path: ${transcriptPath}`);
 
   while (!shouldExit) {
     try {
-      const newEntries = readNewTranscriptEntries(
+      const { newEntries, latestIndex } = readNewTranscriptEntries(
         transcriptPath,
         lastProcessedIndex,
       );
 
+      if (latestIndex !== lastSeenTranscriptIndex) {
+        lastSeenTranscriptIndex = latestIndex;
+        lastActivityAt = Date.now();
+      }
+
       if (newEntries.length >= minMessages) {
         log(`Processing ${newEntries.length} new transcript entries...`);
 
-        let memoryBlocks = loadLocalMemory(payload.cwd);
+        let memoryBlocks = loadLocalMemory(payload.cwd, log);
+        const baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
 
         const transcriptText = formatTranscriptForAgent(newEntries);
         const userMessage = `${transcriptText}
@@ -188,7 +306,8 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
           {
             cwd: payload.cwd,
             sdkToolsMode: payload.sdkToolsMode,
-            systemPromptBuilder: () => buildSystemPrompt(memoryBlocks),
+            systemPromptBuilder: () =>
+              buildSystemPrompt(memoryBlocks, payload.cwd, payload.sdkToolsMode),
             userMessage,
             log,
           },
@@ -198,7 +317,9 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
         memoryBlocks = result.memoryBlocks;
 
         if (result.memoriesUpdated) {
-          saveLocalMemory(payload.cwd, memoryBlocks);
+          saveLocalMemory(payload.cwd, memoryBlocks, log, {
+            baseBlocks: baseMemoryBlocks,
+          });
           log('✓ Saved updated memory blocks');
         }
 
@@ -213,6 +334,16 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
 
         lastProcessedIndex += newEntries.length;
         log(`✓ Processed up to index ${lastProcessedIndex}`);
+      }
+
+      if (
+        idleTimeoutMs > 0 &&
+        Date.now() - lastActivityAt >= idleTimeoutMs
+      ) {
+        log(
+          `Idle timeout reached (${idleTimeoutMs}ms without transcript changes), exiting worker`,
+        );
+        break;
       }
 
       // Sleep before next check
@@ -250,8 +381,13 @@ async function main(): Promise<void> {
     );
     log(`Loaded payload for session ${payload.sessionId}`);
 
-    // Write PID file for process management
-    writePidFile(payload.sessionId, payload.cwd);
+    if (!claimPidFile(payload.sessionId, payload.cwd)) {
+      if (fs.existsSync(payloadFile)) {
+        fs.unlinkSync(payloadFile);
+      }
+      log('Duplicate worker exited before processing payload');
+      return;
+    }
 
     // Ensure cleanup on exit
     process.on('exit', () => cleanupPidFile(payload.sessionId, payload.cwd));
@@ -260,8 +396,10 @@ async function main(): Promise<void> {
     await continuousLoop(payload);
 
     // Cleanup
-    fs.unlinkSync(payloadFile);
-    log('Cleaned up payload file');
+    if (fs.existsSync(payloadFile)) {
+      fs.unlinkSync(payloadFile);
+      log('Cleaned up payload file');
+    }
     log('Continuous Worker shut down successfully');
   } catch (error) {
     const errorMessage =

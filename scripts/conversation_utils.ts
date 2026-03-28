@@ -9,6 +9,11 @@ import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
+import {
+  readJsonFileWithFallback,
+  writeJsonFileAtomic,
+  withProcessLock,
+} from './state_store.js';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -58,7 +63,7 @@ export function ensureConfigFile(cwd: string, log: LogFn = noopLog): void {
   };
 
   ensureDurableStateDir(cwd);
-  fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2), 'utf-8');
+  writeJsonFileAtomic(configPath, defaultConfig, log);
   log(`Created default config.json: ${JSON.stringify(defaultConfig)}`);
 }
 
@@ -104,6 +109,107 @@ export interface MemoryBlock {
 
 export type LogFn = (message: string) => void;
 const noopLog: LogFn = () => {};
+const SUBCONSCIOUS_AF_PATH = 'Subconscious.af';
+
+interface SubconsciousTemplate {
+  systemPrompt?: string;
+  memoryBlocks?: MemoryBlock[];
+}
+
+interface TemplateCacheEntry {
+  mtimeMs: number;
+  template: SubconsciousTemplate | null;
+}
+
+const templateCache = new Map<string, TemplateCacheEntry>();
+
+const CONTINUOUS_WORKER_PID_PREFIX = 'continuous-worker-';
+const CONTINUOUS_WORKER_PID_SUFFIX = '.pid';
+const CONTINUOUS_WORKER_SPAWN_LOCK_SUFFIX = '.spawn.lock';
+const CONTINUOUS_PAYLOAD_PREFIX = 'continuous-payload-';
+const CONTINUOUS_PAYLOAD_SUFFIX = '.json';
+const LOCAL_PAYLOAD_PREFIX = 'payload-';
+const LOCAL_PAYLOAD_SUFFIX = '.json';
+const STALE_PAYLOAD_MAX_AGE_MS = 60 * 60 * 1000;
+const WORKER_SPAWN_LOCK_TIMEOUT_MS = 1500;
+const WORKER_SPAWN_LOCK_STALE_MS = 15000;
+
+function cloneMemoryBlock(block: MemoryBlock): MemoryBlock {
+  return {
+    label: block.label,
+    description: block.description,
+    value: block.value,
+  };
+}
+
+function cloneMemoryBlocks(blocks: MemoryBlock[]): MemoryBlock[] {
+  return blocks.map(cloneMemoryBlock);
+}
+
+function isMemoryBlock(value: unknown): value is MemoryBlock {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<MemoryBlock>;
+  return (
+    typeof candidate.label === 'string' &&
+    typeof candidate.description === 'string' &&
+    typeof candidate.value === 'string'
+  );
+}
+
+function coerceMemoryBlocks(data: unknown): MemoryBlock[] | null {
+  if (!Array.isArray(data) || data.length === 0) {
+    return null;
+  }
+
+  const blocks = data.filter(isMemoryBlock).map(cloneMemoryBlock);
+  return blocks.length > 0 ? blocks : null;
+}
+
+function parseSyncStateData(
+  data: unknown,
+  fallbackSessionId: string,
+): SyncState | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const candidate = data as Partial<SyncState>;
+  if (typeof candidate.lastProcessedIndex !== 'number') {
+    return null;
+  }
+
+  const parsed: SyncState = {
+    lastProcessedIndex: candidate.lastProcessedIndex,
+    sessionId:
+      typeof candidate.sessionId === 'string' && candidate.sessionId.trim()
+        ? candidate.sessionId
+        : fallbackSessionId,
+  };
+
+  if (
+    candidate.lastBlockValues &&
+    typeof candidate.lastBlockValues === 'object'
+  ) {
+    const entries = Object.entries(candidate.lastBlockValues).filter(
+      ([label, value]) => typeof label === 'string' && typeof value === 'string',
+    );
+    if (entries.length > 0) {
+      parsed.lastBlockValues = Object.fromEntries(entries);
+    }
+  }
+
+  if (
+    typeof candidate.lastSeenMessageId === 'string' &&
+    candidate.lastSeenMessageId.trim()
+  ) {
+    parsed.lastSeenMessageId = candidate.lastSeenMessageId;
+  }
+
+  return parsed;
+}
 
 function getCanonicalRepoPath(cwd: string): string {
   const resolved = path.resolve(cwd);
@@ -169,9 +275,13 @@ export function loadSyncState(cwd: string, sessionId: string, log: LogFn = noopL
       continue;
     }
     try {
-      const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-      log(`Loaded state: lastProcessedIndex=${state.lastProcessedIndex}`);
-      return state;
+      const parsed = readJsonFileWithFallback<unknown>(statePath, {}, log);
+      const state = parseSyncStateData(parsed, sessionId);
+      if (state) {
+        log(`Loaded state: lastProcessedIndex=${state.lastProcessedIndex}`);
+        return state;
+      }
+      log(`State file ${path.basename(statePath)} was invalid, ignoring`);
     } catch (e) {
       log(`Failed to load state: ${e}`);
     }
@@ -184,67 +294,418 @@ export function loadSyncState(cwd: string, sessionId: string, log: LogFn = noopL
 export function saveSyncState(cwd: string, state: SyncState, log: LogFn = noopLog): void {
   ensureDurableStateDir(cwd);
   const statePath = getSyncStateFile(cwd, state.sessionId);
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf-8');
+  writeJsonFileAtomic(statePath, state, log);
   log(`Saved state: lastProcessedIndex=${state.lastProcessedIndex}`);
 }
 
 const DEFAULT_MEMORY_BLOCKS: MemoryBlock[] = [
   {
     label: 'core_directives',
-    description: 'Primary role and behavioral guidelines',
-    value: 'ROLE: The Subconscious — a persistent agent that whispers to Claude Code.\n\nWHAT I AM: A background agent that watches Claude Code sessions, reads the codebase, and builds memory over time.\n\nKeep guidance concise. Update memory when observing habits.'
+    description:
+      'Primary role, behavioral guidelines, and processing logic for observing Claude Code sessions.',
+    value:
+      'ROLE: The Subconscious — a persistent agent that whispers to Claude Code.\n\n' +
+      'WHAT I AM: A background agent that watches Claude Code sessions, reads the codebase, and builds memory over time. I receive transcripts asynchronously and build long-term context.\n\n' +
+      'Observe preferences, recurring patterns, project context, and pending work. Write concise, useful guidance when it will help.\n\n' +
+      'VISIBILITY: My messages are rendered visibly to the user as blockquotes in Claude Code\'s responses. Write messages that are worth showing — one clear signal, not a log dump. The user will see exactly what I send.'
   },
   {
     label: 'guidance',
-    description: 'Active guidance for the next Claude Code session.',
-    value: '(No active guidance. Write here when there\'s something genuinely useful for the next session.)'
+    description:
+      'Active guidance for the next Claude Code session. Write here when you have something useful to surface.',
+    value:
+      '(No active guidance. Write here when there\'s something genuinely useful for the next session.)'
   },
   {
     label: 'pending_items',
-    description: 'Unfinished work, explicit TODOs, follow-up items mentioned across sessions.',
-    value: '(No pending items. Populated when sessions end mid-task or user mentions follow-ups.)'
+    description:
+      'Unfinished work, explicit TODOs, follow-up items mentioned across sessions. Clear items when resolved.',
+    value:
+      '(No pending items. Populated when sessions end mid-task or user mentions follow-ups.)'
   },
   {
     label: 'project_context',
-    description: 'Active project knowledge: what the codebase does, architecture decisions, known gotchas, key files.',
-    value: '(No project context yet. Populated as sessions reveal codebase details.)'
+    description:
+      'Active project knowledge: what the codebase does, architecture decisions, known gotchas, key files.',
+    value:
+      '(No project context yet. Populated as sessions reveal codebase details.)'
+  },
+  {
+    label: 'self_improvement',
+    description:
+      'Guidelines for evolving memory architecture and learning procedures.',
+    value:
+      'MEMORY LIMITS (CRITICAL):\n' +
+      '- Keep memory focused and compact.\n' +
+      '- Prefer updating existing blocks over creating new ones.\n' +
+      '- Consolidate stale or duplicate content.\n\n' +
+      'LEARNING PROCEDURES:\n' +
+      '1. Scan for user corrections (preference signals).\n' +
+      '2. Note repeated edits and struggle points.\n' +
+      '3. Capture explicit preference statements.\n' +
+      '4. Track recurring task/tool patterns.\n' +
+      '5. Record unfinished work for continuity.'
   },
   {
     label: 'session_patterns',
-    description: 'Recurring behaviors, time-based patterns, common struggles.',
-    value: '(No patterns observed yet. Populated after multiple sessions.)'
+    description:
+      'Recurring behaviors, time-based patterns, common struggles. Used for pattern-based guidance.',
+    value:
+      '(No patterns observed yet. Populated after multiple sessions.)'
+  },
+  {
+    label: 'tool_guidelines',
+    description:
+      'How to use available tools effectively. Reference when uncertain about tool capabilities.',
+    value:
+      'AVAILABLE TOOLS:\n' +
+      '- memory_replace / memory_insert / memory_rethink for memory edits\n' +
+      '- read_file for local file inspection (always available unless SDK tools are off)\n\n' +
+      'SUBCONSCIOUS RULES:\n' +
+      '- Do not ask the user questions directly.\n' +
+      '- If clarification is needed, suggest what Claude Code should ask next.\n' +
+      '- Treat tool signals like clarification_needed, assumption, risk, and boundary as private reasoning scaffolding.\n\n' +
+      'USAGE PATTERNS:\n' +
+      '- Use small edits for localized changes.\n' +
+      '- Use rethink for major rewrites.\n' +
+      '- Read code before inferring project context.'
   },
   {
     label: 'user_preferences',
-    description: 'Learned coding style, tool preferences, and communication style.',
-    value: '(No user preferences yet. Populated as sessions reveal coding style, tool choices, and communication preferences.)'
+    description:
+      'Learned coding style, tool preferences, and communication style. Updated from corrections and explicit statements.',
+    value:
+      '(No user preferences yet. Populated as sessions reveal coding style, tool choices, and communication preferences.)'
   }
 ];
 
-export function loadLocalMemory(cwd: string, log: LogFn = noopLog): MemoryBlock[] {
-  const memoryFile = getMemoryFile(cwd);
-  if (fs.existsSync(memoryFile)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(memoryFile, 'utf-8'));
-      if (Array.isArray(data) && data.length > 0 && data[0].label) {
-        log(`Loaded memory blocks from disk`);
-        return data as MemoryBlock[];
+function loadSubconsciousTemplate(
+  cwd: string,
+  log: LogFn = noopLog,
+): SubconsciousTemplate | null {
+  const templatePath = path.join(cwd, SUBCONSCIOUS_AF_PATH);
+  if (!fs.existsSync(templatePath)) {
+    return null;
+  }
+
+  const stat = fs.statSync(templatePath);
+  const cached = templateCache.get(templatePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs) {
+    return cached.template;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(templatePath, 'utf-8')) as {
+      agents?: Array<{ system?: string }>;
+      blocks?: Array<{
+        label?: unknown;
+        description?: unknown;
+        value?: unknown;
+      }>;
+    };
+
+    const template: SubconsciousTemplate = {};
+    const systemPrompt = parsed.agents?.[0]?.system;
+    if (typeof systemPrompt === 'string' && systemPrompt.trim()) {
+      template.systemPrompt = systemPrompt;
+    }
+
+    const blockCandidates = parsed.blocks || [];
+    const memoryBlocks: MemoryBlock[] = [];
+    const seenLabels = new Set<string>();
+    for (const block of blockCandidates) {
+      const label =
+        typeof block.label === 'string' ? block.label.trim() : '';
+      if (!label || seenLabels.has(label)) {
+        continue;
       }
-    } catch (e) {
-      log(`Failed to load memory blocks: ${e}`);
+      seenLabels.add(label);
+      memoryBlocks.push({
+        label,
+        description:
+          typeof block.description === 'string'
+            ? block.description
+            : '',
+        value: typeof block.value === 'string' ? block.value : '',
+      });
+    }
+
+    if (memoryBlocks.length > 0) {
+      template.memoryBlocks = memoryBlocks;
+    }
+
+    if (!template.systemPrompt && !template.memoryBlocks) {
+      templateCache.set(templatePath, { mtimeMs: stat.mtimeMs, template: null });
+      return null;
+    }
+    templateCache.set(templatePath, { mtimeMs: stat.mtimeMs, template });
+    return template;
+  } catch (error) {
+    log(`Failed to parse ${SUBCONSCIOUS_AF_PATH}: ${error}`);
+    templateCache.set(templatePath, { mtimeMs: stat.mtimeMs, template: null });
+    return null;
+  }
+}
+
+function normalizeMemoryBlocksToTemplate(
+  existingBlocks: MemoryBlock[],
+  templateBlocks: MemoryBlock[],
+): { blocks: MemoryBlock[]; changed: boolean } {
+  const existingByLabel = new Map(existingBlocks.map((b) => [b.label, b]));
+  const normalized: MemoryBlock[] = templateBlocks.map((tmpl) => {
+    const existing = existingByLabel.get(tmpl.label);
+    if (!existing) {
+      return { ...tmpl };
+    }
+    return {
+      label: tmpl.label,
+      description: existing.description || tmpl.description,
+      value: existing.value ?? tmpl.value,
+    };
+  });
+
+  const templateLabels = new Set(templateBlocks.map((b) => b.label));
+  for (const block of existingBlocks) {
+    if (!templateLabels.has(block.label)) {
+      normalized.push(block);
     }
   }
-  log(`Initializing default memory blocks`);
-  ensureDurableStateDir(cwd);
-  fs.writeFileSync(memoryFile, JSON.stringify(DEFAULT_MEMORY_BLOCKS, null, 2), 'utf-8');
+
+  const changed =
+    normalized.length !== existingBlocks.length ||
+    normalized.some((block, idx) => {
+      const existing = existingBlocks[idx];
+      return (
+        !existing ||
+        existing.label !== block.label ||
+        existing.description !== block.description ||
+        existing.value !== block.value
+      );
+    });
+
+  return { blocks: normalized, changed };
+}
+
+function getDefaultTemplateMemoryBlocks(
+  cwd: string,
+  log: LogFn = noopLog,
+): MemoryBlock[] {
+  const templateBlocks = loadSubconsciousTemplate(cwd, log)?.memoryBlocks;
+  if (templateBlocks && templateBlocks.length > 0) {
+    return templateBlocks;
+  }
   return DEFAULT_MEMORY_BLOCKS;
 }
 
-export function saveLocalMemory(cwd: string, blocks: MemoryBlock[], log: LogFn = noopLog): void {
+export function getSubconsciousSystemPrompt(
+  cwd: string,
+  fallback: string,
+  log: LogFn = noopLog,
+): string {
+  const fromTemplate = loadSubconsciousTemplate(cwd, log)?.systemPrompt;
+  if (fromTemplate && fromTemplate.trim()) {
+    return fromTemplate;
+  }
+  return fallback;
+}
+
+function readMemoryBlocksFromFile(
+  memoryFile: string,
+  templateMemoryBlocks: MemoryBlock[],
+  log: LogFn,
+): { blocks: MemoryBlock[]; needsWrite: boolean } {
+  if (!fs.existsSync(memoryFile)) {
+    return {
+      blocks: cloneMemoryBlocks(templateMemoryBlocks),
+      needsWrite: true,
+    };
+  }
+
+  const rawData = readJsonFileWithFallback<unknown>(
+    memoryFile,
+    templateMemoryBlocks,
+    log,
+  );
+  const existingBlocks = coerceMemoryBlocks(rawData);
+  if (!existingBlocks) {
+    log(`Memory file was invalid or empty, restoring defaults`);
+    return {
+      blocks: cloneMemoryBlocks(templateMemoryBlocks),
+      needsWrite: true,
+    };
+  }
+
+  const { blocks, changed } = normalizeMemoryBlocksToTemplate(
+    existingBlocks,
+    templateMemoryBlocks,
+  );
+
+  return {
+    blocks,
+    needsWrite: changed,
+  };
+}
+
+function diffMemoryBlocks(
+  baseBlocks: MemoryBlock[],
+  updatedBlocks: MemoryBlock[],
+): { touchedLabels: Set<string>; deletedLabels: Set<string> } {
+  const baseByLabel = new Map(baseBlocks.map((block) => [block.label, block]));
+  const updatedByLabel = new Map(
+    updatedBlocks.map((block) => [block.label, block]),
+  );
+  const touchedLabels = new Set<string>();
+  const deletedLabels = new Set<string>();
+  const labels = new Set([
+    ...baseByLabel.keys(),
+    ...updatedByLabel.keys(),
+  ]);
+
+  for (const label of labels) {
+    const before = baseByLabel.get(label);
+    const after = updatedByLabel.get(label);
+
+    if (!before && after) {
+      touchedLabels.add(label);
+      continue;
+    }
+
+    if (before && !after) {
+      deletedLabels.add(label);
+      continue;
+    }
+
+    if (
+      before &&
+      after &&
+      (before.description !== after.description || before.value !== after.value)
+    ) {
+      touchedLabels.add(label);
+    }
+  }
+
+  return { touchedLabels, deletedLabels };
+}
+
+function mergeMemoryBlocks(
+  currentBlocks: MemoryBlock[],
+  baseBlocks: MemoryBlock[],
+  updatedBlocks: MemoryBlock[],
+): MemoryBlock[] {
+  const { touchedLabels, deletedLabels } = diffMemoryBlocks(
+    baseBlocks,
+    updatedBlocks,
+  );
+
+  if (touchedLabels.size === 0 && deletedLabels.size === 0) {
+    return cloneMemoryBlocks(currentBlocks);
+  }
+
+  const updatedByLabel = new Map(
+    updatedBlocks.map((block) => [block.label, cloneMemoryBlock(block)]),
+  );
+  const merged: MemoryBlock[] = [];
+  const seenLabels = new Set<string>();
+
+  for (const block of currentBlocks) {
+    if (deletedLabels.has(block.label)) {
+      continue;
+    }
+
+    if (touchedLabels.has(block.label)) {
+      const replacement = updatedByLabel.get(block.label);
+      if (replacement) {
+        merged.push(replacement);
+        seenLabels.add(block.label);
+      }
+      continue;
+    }
+
+    merged.push(cloneMemoryBlock(block));
+    seenLabels.add(block.label);
+  }
+
+  for (const block of updatedBlocks) {
+    if (!touchedLabels.has(block.label) || seenLabels.has(block.label)) {
+      continue;
+    }
+    merged.push(cloneMemoryBlock(block));
+    seenLabels.add(block.label);
+  }
+
+  return merged;
+}
+
+export function loadLocalMemory(cwd: string, log: LogFn = noopLog): MemoryBlock[] {
+  const templateMemoryBlocks = getDefaultTemplateMemoryBlocks(cwd, log);
+  const memoryFile = getMemoryFile(cwd);
+
+  try {
+    const { blocks, needsWrite } = readMemoryBlocksFromFile(
+      memoryFile,
+      templateMemoryBlocks,
+      log,
+    );
+
+    if (needsWrite) {
+      ensureDurableStateDir(cwd);
+      writeJsonFileAtomic(memoryFile, blocks, log);
+      log(`Normalized memory blocks to ${SUBCONSCIOUS_AF_PATH} structure`);
+    }
+
+    log(`Loaded memory blocks from disk`);
+    return blocks;
+  } catch (e) {
+    log(`Failed to load memory blocks: ${e}`);
+  }
+
+  log(`Initializing default memory blocks`);
+  ensureDurableStateDir(cwd);
+  writeJsonFileAtomic(memoryFile, templateMemoryBlocks, log);
+  return cloneMemoryBlocks(templateMemoryBlocks);
+}
+
+export interface SaveLocalMemoryOptions {
+  baseBlocks?: MemoryBlock[];
+}
+
+export function saveLocalMemory(
+  cwd: string,
+  blocks: MemoryBlock[],
+  log: LogFn = noopLog,
+  options: SaveLocalMemoryOptions = {},
+): void {
   ensureDurableStateDir(cwd);
   const memoryFile = getMemoryFile(cwd);
-  fs.writeFileSync(memoryFile, JSON.stringify(blocks, null, 2), 'utf-8');
-  log(`Saved memory blocks to disk`);
+  const templateMemoryBlocks = getDefaultTemplateMemoryBlocks(cwd, log);
+
+  withProcessLock(
+    `${memoryFile}.lock`,
+    () => {
+      const { blocks: currentBlocks } = readMemoryBlocksFromFile(
+        memoryFile,
+        templateMemoryBlocks,
+        log,
+      );
+      const blocksToSave = options.baseBlocks
+        ? mergeMemoryBlocks(currentBlocks, options.baseBlocks, blocks)
+        : cloneMemoryBlocks(blocks);
+      const { blocks: normalizedBlocks } = normalizeMemoryBlocksToTemplate(
+        blocksToSave,
+        templateMemoryBlocks,
+      );
+
+      writeJsonFileAtomic(memoryFile, normalizedBlocks, log);
+      log(
+        options.baseBlocks
+          ? 'Saved memory blocks to disk with merge-on-save'
+          : 'Saved memory blocks to disk',
+      );
+    },
+    {
+      log,
+    },
+  );
 }
 
 // ============================================
@@ -278,9 +739,9 @@ export function escapeRegex(str: string): string {
 
 function formatContextSection(): string {
   return `${SUBNOTES_CONTEXT_START}
-**Claude's SubNotes**
+**Subconscious**
 
-This agent maintains persistent memory across your sessions. It observes your conversations asynchronously and provides guidance via <subnotes_message> (injected before each user prompt). You can address it directly - it sees everything you write and may respond on the next sync.
+This is your persistent subconscious layer. It observes conversations asynchronously, updates memory blocks, and surfaces thoughts via <subnotes_message>. You can address it directly — it sees everything and may respond on the next sync.
 
 Memory blocks below are the agent's long-term storage. Reference as needed.
 ${SUBNOTES_CONTEXT_END}`;
@@ -401,7 +862,7 @@ export function formatAllBlocksForStdout(blocks: MemoryBlock[]): string {
       : 'It operates in listen-only mode (memory updates only).';
 
   const header = `<subnotes_context>
-SubNotes agent is watching this session and whispering guidance.
+Subconscious is active and observing this session.
 ${capabilityLine}
 </subnotes_context>`;
 
@@ -498,8 +959,186 @@ export function getContinuousWorkerPidFile(sessionId: string, cwd: string): stri
   return path.join(getTempStateDir(), `continuous-worker-${namespace}-${sessionId}.pid`);
 }
 
+function getContinuousWorkerSpawnLockFile(sessionId: string, cwd: string): string {
+  const namespace = getRepoNamespace(cwd);
+  return path.join(
+    getTempStateDir(),
+    `continuous-worker-${namespace}-${sessionId}${CONTINUOUS_WORKER_SPAWN_LOCK_SUFFIX}`,
+  );
+}
+
 function getLegacyContinuousWorkerPidFile(sessionId: string): string {
   return path.join(getTempStateDir(), `continuous-worker-${sessionId}.pid`);
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    // EPERM means process exists but we don't have permission to signal it.
+    return err.code === 'EPERM';
+  }
+}
+
+function removePidFile(pidFile: string, log: LogFn): void {
+  try {
+    if (fs.existsSync(pidFile)) {
+      fs.unlinkSync(pidFile);
+      log(`Removed stale PID file: ${pidFile}`);
+    }
+  } catch (error) {
+    log(`Failed to remove stale PID file ${pidFile}: ${error}`);
+  }
+}
+
+function readPidFile(pidFile: string, log: LogFn = noopLog): number | null {
+  try {
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    if (Number.isNaN(pid) || pid <= 0) {
+      return null;
+    }
+    return pid;
+  } catch (error) {
+    log(`Failed to read PID file ${pidFile}: ${error}`);
+    return null;
+  }
+}
+
+function removePidFileIfMatches(
+  pidFile: string,
+  expectedPid: number,
+  log: LogFn = noopLog,
+): void {
+  if (!fs.existsSync(pidFile)) {
+    return;
+  }
+
+  const currentPid = readPidFile(pidFile, log);
+  if (currentPid === null) {
+    removePidFile(pidFile, log);
+    return;
+  }
+
+  if (currentPid !== expectedPid) {
+    log(
+      `Skipping PID cleanup for ${pidFile}; ownership moved from ${expectedPid} to ${currentPid}`,
+    );
+    return;
+  }
+
+  removePidFile(pidFile, log);
+}
+
+function cleanupStaleFileIfOlderThan(
+  filePath: string,
+  maxAgeMs: number,
+  log: LogFn = noopLog,
+): void {
+  try {
+    const stat = fs.statSync(filePath);
+    if (Date.now() - stat.mtimeMs < maxAgeMs) {
+      return;
+    }
+    fs.unlinkSync(filePath);
+    log(`Removed stale artifact: ${filePath}`);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== 'ENOENT') {
+      log(`Failed to remove stale artifact ${filePath}: ${error}`);
+    }
+  }
+}
+
+export function cleanupStaleContinuousWorkerArtifacts(
+  log: LogFn = noopLog,
+): void {
+  const tempDir = getTempStateDir();
+  if (!fs.existsSync(tempDir)) {
+    return;
+  }
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(tempDir);
+  } catch (error) {
+    log(`Failed to scan temp state dir ${tempDir}: ${error}`);
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(tempDir, entry);
+
+    if (
+      entry.startsWith(CONTINUOUS_WORKER_PID_PREFIX) &&
+      entry.endsWith(CONTINUOUS_WORKER_PID_SUFFIX)
+    ) {
+      const pid = readPidFile(fullPath, log);
+      if (pid === null || !isProcessRunning(pid)) {
+        removePidFile(fullPath, log);
+      }
+      continue;
+    }
+
+    if (
+      entry.startsWith(CONTINUOUS_PAYLOAD_PREFIX) &&
+      entry.endsWith(CONTINUOUS_PAYLOAD_SUFFIX)
+    ) {
+      cleanupStaleFileIfOlderThan(fullPath, STALE_PAYLOAD_MAX_AGE_MS, log);
+      continue;
+    }
+
+    if (
+      entry.startsWith(LOCAL_PAYLOAD_PREFIX) &&
+      entry.endsWith(LOCAL_PAYLOAD_SUFFIX)
+    ) {
+      cleanupStaleFileIfOlderThan(fullPath, STALE_PAYLOAD_MAX_AGE_MS, log);
+    }
+  }
+}
+
+/**
+ * Removes stale PID files for the given session and returns a running PID if found.
+ */
+export function cleanupStaleContinuousWorkerPidFiles(
+  sessionId: string,
+  cwd: string,
+  log: LogFn = noopLog,
+): number | null {
+  const pidFiles = [
+    getContinuousWorkerPidFile(sessionId, cwd),
+    getLegacyContinuousWorkerPidFile(sessionId),
+  ];
+
+  for (const pidFile of pidFiles) {
+    if (!fs.existsSync(pidFile)) {
+      continue;
+    }
+
+    let pid: number;
+    try {
+      pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    } catch (error) {
+      log(`Failed to read PID file ${pidFile}: ${error}`);
+      removePidFile(pidFile, log);
+      continue;
+    }
+
+    if (Number.isNaN(pid) || pid <= 0) {
+      log(`Invalid PID in ${pidFile}, cleaning up`);
+      removePidFile(pidFile, log);
+      continue;
+    }
+
+    if (isProcessRunning(pid)) {
+      return pid;
+    }
+
+    removePidFile(pidFile, log);
+  }
+
+  return null;
 }
 
 /**
@@ -526,28 +1165,7 @@ export function appendTranscriptEntry(
  * Check if continuous agent is running for a session
  */
 export function isContinuousAgentRunning(sessionId: string, cwd: string): boolean {
-  const pidFiles = [
-    getContinuousWorkerPidFile(sessionId, cwd),
-    getLegacyContinuousWorkerPidFile(sessionId),
-  ];
-
-  for (const pidFile of pidFiles) {
-    if (!fs.existsSync(pidFile)) {
-      continue;
-    }
-
-    try {
-      const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-
-      // Check if process is actually running
-      process.kill(pid, 0); // Signal 0 checks if process exists without killing it
-      return true;
-    } catch (error) {
-      // Process doesn't exist or permission error; continue checking others.
-    }
-  }
-
-  return false;
+  return cleanupStaleContinuousWorkerPidFiles(sessionId, cwd) !== null;
 }
 
 /**
@@ -556,29 +1174,47 @@ export function isContinuousAgentRunning(sessionId: string, cwd: string): boolea
 export function ensureContinuousWorker(
   sessionId: string,
   cwd: string,
-  sdkToolsMode: 'read-only' | 'full' | 'off'
+  sdkToolsMode: 'read-only' | 'full' | 'off',
+  log: LogFn = noopLog,
 ): ChildProcess | null {
-  // Check if already running
-  if (isContinuousAgentRunning(sessionId, cwd)) {
-    return null;
-  }
+  cleanupStaleContinuousWorkerArtifacts(log);
 
-  // Create payload
-  const payload = {
-    sessionId,
-    cwd,
-    sdkToolsMode,
-  };
+  return withProcessLock(
+    getContinuousWorkerSpawnLockFile(sessionId, cwd),
+    () => {
+      cleanupStaleContinuousWorkerPidFiles(sessionId, cwd, log);
 
-  const tempDir = getTempStateDir();
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
+      if (isContinuousAgentRunning(sessionId, cwd)) {
+        log(`Continuous worker already running for session ${sessionId}`);
+        return null;
+      }
 
-  const namespace = getRepoNamespace(cwd);
-  const payloadFile = path.join(tempDir, `continuous-payload-${namespace}-${sessionId}.json`);
-  fs.writeFileSync(payloadFile, JSON.stringify(payload));
+      const payload = {
+        sessionId,
+        cwd,
+        sdkToolsMode,
+      };
 
-  const workerScript = path.join(__dirname, 'send_worker_continuous.ts');
-  return spawnSilentWorker(workerScript, payloadFile, cwd);
+      const tempDir = getTempStateDir();
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const namespace = getRepoNamespace(cwd);
+      const payloadFile = path.join(
+        tempDir,
+        `continuous-payload-${namespace}-${sessionId}.json`,
+      );
+      writeJsonFileAtomic(payloadFile, payload, log);
+      log(`Wrote worker payload: ${payloadFile}`);
+
+      const workerScript = path.join(__dirname, 'send_worker_continuous.ts');
+      return spawnSilentWorker(workerScript, payloadFile, cwd);
+    },
+    {
+      log,
+      timeoutMs: WORKER_SPAWN_LOCK_TIMEOUT_MS,
+      staleMs: WORKER_SPAWN_LOCK_STALE_MS,
+    },
+  );
 }

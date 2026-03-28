@@ -98,6 +98,7 @@ export SUBNOTES_MODE="whisper"           # Default. Or "full" for blocks + messa
 export SUBNOTES_HOME="$HOME"             # Consolidate .subnotes state to ~/.subnotes/
 export SUBNOTES_SDK_TOOLS="read-only"    # Or "full", "off"
 export SUBNOTES_DEBUG="1"                # Enable debug logging
+export SUBNOTES_IDLE_TIMEOUT="1800000"   # Optional: worker idle self-shutdown in ms (0 disables)
 export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 ```
 
@@ -105,6 +106,7 @@ export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 - `SUBNOTES_HOME` - Base directory for plugin state files. Creates `{SUBNOTES_HOME}/.subnotes/` for session data and memory blocks. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
 - `SUBNOTES_SDK_TOOLS` - Controls client-side tool access for the SubNotes agent. `read-only` (default), `full`, or `off`. See [SDK Tools](#sdk-tools).
 - `SUBNOTES_DEBUG` - Set to `1` to enable debug logging.
+- `SUBNOTES_IDLE_TIMEOUT` - Optional idle timeout in milliseconds for the detached worker. Default `1800000` (30 min). Set to `0` to disable idle self-termination.
 - `ANTHROPIC_MODEL` - Override the Claude model. Defaults to `claude-sonnet-4-5-20250929`.
 
 ### Modes
@@ -157,7 +159,7 @@ Claude Code can address the SubNotes agent directly in responses. The agent sees
 
 ## Hooks
 
-The plugin uses four Claude Code hooks:
+The plugin uses five Claude Code hooks:
 
 | Hook | Script | Timeout | Purpose |
 |------|--------|---------|---------|
@@ -165,6 +167,7 @@ The plugin uses four Claude Code hooks:
 | `UserPromptSubmit` | `stream_transcript.ts` + `sync_local_memory.ts` | 3s + 10s | Streams user input + injects memory/messages |
 | `PostToolUse` | `stream_transcript.ts` | 3s | Streams tool events to the continuous worker |
 | `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow hidden whispers via `additionalContext` |
+| `SessionEnd` | `stop_continuous_worker.ts` | 5s | Stops the session worker and cleans up PID files |
 
 ### SessionStart
 
@@ -196,6 +199,13 @@ After each tool call:
 - Streams tool execution metadata/results into transcript queue
 - Enables SubNotes to reason between tool calls, not only between prompts
 
+### SessionEnd
+
+When a Claude Code session ends:
+- Stops the detached worker for that session (SIGTERM)
+- Cleans up namespaced and legacy PID files
+- Prevents worker processes from lingering after session close
+
 ### SDK Tools
 
 SubNotes has access to tools during transcript processing:
@@ -215,6 +225,7 @@ SubNotes now runs as a single continuous execution model:
 - Worker consumes streamed transcript events (`UserPromptSubmit` + `PostToolUse`)
 - Worker updates memory blocks and queues SubNotes whispers in near real-time
 - `PreToolUse` injects the freshest state back into Claude before each tool call
+- `SessionEnd` shuts down the session worker; idle workers also self-terminate (default: 30 minutes without transcript changes)
 
 ## State Management
 
@@ -227,6 +238,7 @@ Persisted in your project directory (or `$SUBNOTES_HOME/.subnotes/{repoHash}/` i
 - `agent_messages.json` - Messages from SubNotes to Claude Code
 - `session-{repoHash}-{id}.json` - Per-session state (last processed index)
 - Session/transcript files are namespaced by a repo hash to avoid collisions across repos when sharing `SUBNOTES_HOME`
+- If `Subconscious.af` exists in repo root, SubNotes uses it as the template source for system prompt + default/required memory block structure
 
 ### Temporary State (`$TMPDIR/subnotes-sync-$UID/`)
 
@@ -319,7 +331,8 @@ tail -f /tmp/subnotes-sync-$(id -u)/send_worker_continuous.log
 - Memory stored in local JSON files (`.subnotes/memory.json`)
 - Agent powered by Anthropic SDK (`@anthropic-ai/sdk`)
 - Continuous worker runs detached and processes transcript events in real-time
-- Memory updates via tool calls: `memory_replace`, `memory_insert`, `memory_rethink`
+- Tool handlers are modularized under `scripts/framework/tools/` (`memory`, `conversation_search`, `web_search`, `fetch_webpage`, `Read`, `Glob`, `Grep`)
+- Memory updates via tool calls: `memory`, `memory_replace`, `memory_insert`, `memory_rethink`
 
 For a comprehensive technical overview of the system design, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
