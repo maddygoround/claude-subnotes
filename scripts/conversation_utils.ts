@@ -820,9 +820,8 @@ export function cleanSubNotesFromClaudeMd(projectDir: string): void {
 
   const content = fs.readFileSync(claudeMdPath, 'utf-8');
 
-  // Clean both old letta tags and new subnotes tags for migration
+  // Clean new subnotes tags for migration
   const patterns = [
-    `^<letta>[\\s\\S]*?^<\\/letta>\\n*`,
     `^${escapeRegex(SUBNOTES_SECTION_START)}[\\s\\S]*?^${escapeRegex(SUBNOTES_SECTION_END)}\\n*`
   ];
 
@@ -833,7 +832,6 @@ export function cleanSubNotesFromClaudeMd(projectDir: string): void {
   }
 
   const messagePatterns = [
-    /^<letta_message>[\s\S]*?^<\/letta_message>\n*/gm,
     /^<subnotes_message>[\s\S]*?^<\/subnotes_message>\n*/gm
   ];
 

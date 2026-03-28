@@ -2,7 +2,7 @@
 
 A persistent memory agent for Claude Code. A local Claude agent that watches your sessions, reads your files, builds up memory over time, and whispers guidance back.
 
-![evil claude](assets/evil-claude.jpeg)
+![evil claude](assets/evil-claude.png)
 
 ## What Is This?
 
@@ -23,7 +23,7 @@ After each response, the transcript is sent to a local Claude agent via the Anth
 
 ```
 ┌─────────────┐          ┌─────────────────────────────┐
-│ Claude Code │◄────────►│ SubNotes Agent (background) │
+│ Claude Code │◄────────►│ Reflect Agent (background)  │
 └─────────────┘          │                             │
        │                 │  Tools: Read, memory ops    │
        │                 │  Memory: .subnotes/         │
@@ -125,7 +125,7 @@ The `SUBNOTES_MODE` environment variable controls what gets injected into Claude
 | **`full`** | Memory blocks + messages | Full context — blocks on first prompt, diffs after |
 | **`off`** | Nothing | Disable hooks temporarily |
 
-SubNotes **never writes to CLAUDE.md** in any mode. All content is injected via stdout into the prompt context. Legacy `<letta>` or `<subnotes>` content in CLAUDE.md will be cleaned up automatically.
+SubNotes **never writes to CLAUDE.md** in any mode. All content is injected via stdout into the prompt context. Legacy `<subnotes>` content in CLAUDE.md will be cleaned up automatically.
 
 ### Multi-Project Usage
 
@@ -181,7 +181,7 @@ The plugin uses five Claude Code hooks:
 When a new Claude Code session begins:
 - Initializes local memory blocks (loads from `.subnotes/memory.json`)
 - Starts a detached continuous worker for this session
-- Cleans up any legacy `<letta>` or `<subnotes>` content from CLAUDE.md
+- Cleans up any legacy `<subnotes>` content from CLAUDE.md
 - Saves session state for other hooks to reference
 - Displays startup banner with configuration
 
