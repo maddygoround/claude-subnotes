@@ -5,6 +5,7 @@ import {
   type ToolExecutionResult,
   type ToolHandler,
 } from './types.js';
+import { loadConfig } from '../../conversation_utils.js';
 
 interface WebSearchItem {
   title: string;
@@ -31,8 +32,9 @@ async function fetchWithTimeout(
   }
 }
 
-async function searchViaExa(input: Record<string, unknown>): Promise<WebSearchItem[]> {
-  const apiKey = process.env.EXA_API_KEY;
+async function searchViaExa(input: Record<string, unknown>, cwd: string): Promise<WebSearchItem[]> {
+  const config = loadConfig(cwd);
+  const apiKey = config.exaApiKey;
   if (!apiKey) return [];
 
   const numResultsRaw = Number(input.num_results ?? 5);
@@ -149,7 +151,7 @@ async function searchViaDuckDuckGo(
   return items.slice(0, limit);
 }
 
-async function executeWebSearch(input: Record<string, unknown>): Promise<ToolExecutionResult> {
+async function executeWebSearch(input: Record<string, unknown>, cwd: string): Promise<ToolExecutionResult> {
   const query = String(input.query || '').trim();
   if (!query) {
     throw new Error('web_search requires query');
@@ -164,14 +166,15 @@ async function executeWebSearch(input: Record<string, unknown>): Promise<ToolExe
   let backend: 'exa' | 'duckduckgo' = 'exa';
   let fallbackReason = '';
   try {
-    results = await searchViaExa(input);
+    results = await searchViaExa(input, cwd);
   } catch {
     fallbackReason = 'Exa search failed';
   }
   if (results.length === 0) {
     backend = 'duckduckgo';
     if (!fallbackReason) {
-      fallbackReason = process.env.EXA_API_KEY
+      const config = loadConfig(cwd);
+      fallbackReason = config.exaApiKey
         ? 'Exa returned no results'
         : 'EXA_API_KEY is not configured';
     }
@@ -336,7 +339,7 @@ const webSearchDefinition = defineTool({
     },
     required: ['query'],
   },
-  execute: (input) => executeWebSearch(input),
+  execute: (input, context) => executeWebSearch(input, context.cwd),
 });
 
 const fetchWebpageDefinition = defineTool({

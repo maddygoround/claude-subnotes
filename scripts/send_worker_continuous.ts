@@ -7,6 +7,13 @@
  * and updating memory in real-time.
  *
  * This enables PreToolUse to inject fresh analysis mid-conversation.
+ *
+ * Autonomic Pipeline (Systems 1-4):
+ * Phase 1: Ingest transcript (existing)
+ * Phase 2: Crystallize observations into patterns (System 1)
+ * Phase 3: Promote patterns to reflex rules (System 2)
+ * Phase 4: Resolve intervention outcomes (System 3)
+ * Phase 5: Self-tune confidence and thresholds (System 4)
  */
 
 import * as fs from 'fs';
@@ -20,13 +27,35 @@ import { withProcessLock } from './state_store.js';
 import {
   loadLocalMemory,
   saveLocalMemory,
+  loadConfig,
   MemoryBlock,
   SdkToolsMode,
   getTempStateDir,
   getContinuousTranscriptPath,
   getContinuousWorkerPidFile,
   getSubconsciousSystemPrompt,
+  isAutonomicEnabled,
 } from './conversation_utils.js';
+import {
+  appendObservation,
+  loadRecentObservations,
+  loadPatterns,
+  savePatterns,
+  loadAllReflexRules,
+  saveReflexRules,
+  loadInterventions,
+  saveInterventions,
+  loadMetaConfig,
+  saveMetaConfig,
+  truncateObservations,
+  crystallize,
+  promotePatterns,
+  resolveOutcomes,
+  getRecentlyResolved,
+  pruneInterventions,
+  tune,
+} from './autonomic/index.js';
+import type { ObservationEntry } from './autonomic/types.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'send_worker_continuous.log');
@@ -271,6 +300,220 @@ function buildSystemPrompt(
 }
 
 // ============================================
+// Autonomic Pipeline (Phases 2-5)
+// ============================================
+
+// Autonomic interval/threshold defaults are now provided by config.json via loadConfig()
+
+/**
+ * Convert transcript entries to observation entries for the autonomic store.
+ */
+function transcriptToObservations(
+  entries: TranscriptEntry[],
+  sessionId: string,
+): ObservationEntry[] {
+  const observations: ObservationEntry[] = [];
+  let lastWasUserPrompt = false;
+
+  for (const entry of entries) {
+    if (entry.role === 'user') {
+      lastWasUserPrompt = true;
+      continue;
+    }
+
+    if (entry.role === 'system' && entry.content.includes('<tool_event>')) {
+      const toolNameMatch = entry.content.match(/<name>(.*?)<\/name>/);
+      const toolInputMatch = entry.content.match(/<input>([\s\S]*?)<\/input>/);
+      const toolResponseMatch = entry.content.match(
+        /<response>([\s\S]*?)<\/response>/,
+      );
+
+      if (toolNameMatch) {
+        const toolName = toolNameMatch[1];
+        const toolInput = toolInputMatch ? toolInputMatch[1] : '';
+        const toolResponse = toolResponseMatch ? toolResponseMatch[1] : '';
+
+        // Extract file paths from input
+        const fileMatches = toolInput.match(
+          /(?:file_path|filePath|path|TargetFile|AbsolutePath)["':\s]+["']?([^"'\s,}\]]+)/g,
+        );
+        const files = fileMatches
+          ? fileMatches.map((m) => {
+              const match = m.match(/["']?([^"'\s,}\]]+)$/);
+              return match ? match[1] : '';
+            }).filter(Boolean)
+          : [];
+
+        // Check for failure
+        const failurePatterns = [
+          'error',
+          'Error',
+          'FAIL',
+          'failed',
+          'exit code',
+          'ENOENT',
+        ];
+        const success = !failurePatterns.some((p) =>
+          toolResponse.includes(p),
+        );
+
+        observations.push({
+          timestamp: entry.timestamp,
+          tool_name: toolName,
+          files,
+          success,
+          error: success
+            ? undefined
+            : toolResponse.slice(0, 200),
+          follows_user_prompt: lastWasUserPrompt,
+          session_id: sessionId,
+        });
+      }
+    }
+
+    lastWasUserPrompt = false;
+  }
+
+  return observations;
+}
+
+/**
+ * Run the autonomic processing pipeline (Phases 2-5).
+ * Called after each transcript processing cycle.
+ *
+ * Phases 2-5 are batched: they only run every CRYSTALLIZE_INTERVAL cycles
+ * or when enough observations have accumulated.
+ */
+async function runAutonomicPipeline(
+  payload: ContinuousPayload,
+  newEntries: TranscriptEntry[],
+  cycleCount: number,
+  pipelineLog: typeof log,
+): Promise<void> {
+  const { cwd, sessionId } = payload;
+
+  // Phase: Convert transcript entries to observations and append
+  const observations = transcriptToObservations(newEntries, sessionId);
+  if (observations.length > 0) {
+    for (const obs of observations) {
+      appendObservation(cwd, obs, pipelineLog);
+    }
+    pipelineLog(
+      `[Autonomic] Logged ${observations.length} observations`,
+    );
+  }
+
+  const reflectConfig = loadConfig(cwd);
+  const crystallizeInterval = reflectConfig.crystallizeInterval;
+  const minObsForCrystallize = reflectConfig.minObservations;
+
+  // Check if it's time for the heavy phases (batched)
+  const recentObs = loadRecentObservations(cwd, 200, pipelineLog);
+  const shouldCrystallize =
+    cycleCount % crystallizeInterval === 0 ||
+    recentObs.length >= minObsForCrystallize * 2;
+
+  if (!shouldCrystallize) {
+    return;
+  }
+
+  pipelineLog(
+    `[Autonomic] Running full pipeline (cycle ${cycleCount}, ${recentObs.length} observations)...`,
+  );
+
+  // Phase 2: Crystallize patterns (System 1)
+  let patterns = loadPatterns(cwd, pipelineLog);
+  try {
+    patterns = await crystallize(cwd, recentObs, patterns, pipelineLog);
+    savePatterns(cwd, patterns, pipelineLog);
+    pipelineLog(`[Autonomic] Phase 2 complete: ${patterns.length} patterns`);
+  } catch (err) {
+    pipelineLog(`[Autonomic] Phase 2 error: ${err}`);
+  }
+
+  // Phase 3: Promote patterns to reflex rules (System 2)
+  let rules = loadAllReflexRules(cwd, pipelineLog);
+  try {
+    const metaConfig = loadMetaConfig(cwd, pipelineLog);
+    rules = promotePatterns(patterns, rules, metaConfig, pipelineLog);
+    saveReflexRules(cwd, rules, pipelineLog);
+    pipelineLog(
+      `[Autonomic] Phase 3 complete: ${rules.filter((r) => r.active).length} active rules`,
+    );
+  } catch (err) {
+    pipelineLog(`[Autonomic] Phase 3 error: ${err}`);
+  }
+
+  // Phase 4: Resolve intervention outcomes (System 3)
+  let interventions = loadInterventions(cwd, pipelineLog);
+  try {
+    // Convert recent transcript entries to the format expected by the tracker
+    const transcriptForTracker = newEntries.map((e) => ({
+      timestamp: e.timestamp,
+      role: e.role,
+      content: e.content,
+    }));
+
+    interventions = resolveOutcomes(
+      interventions,
+      transcriptForTracker,
+      reflectConfig,
+      pipelineLog,
+    );
+    interventions = pruneInterventions(interventions, 500);
+    saveInterventions(cwd, interventions, pipelineLog);
+
+    const unresolvedCount = interventions.filter(
+      (i) => i.outcome === null,
+    ).length;
+    pipelineLog(
+      `[Autonomic] Phase 4 complete: ${interventions.length} interventions (${unresolvedCount} pending)`,
+    );
+  } catch (err) {
+    pipelineLog(`[Autonomic] Phase 4 error: ${err}`);
+  }
+
+  // Phase 5: Self-tune (System 4)
+  try {
+    let metaConfig = loadMetaConfig(cwd, pipelineLog);
+    const recentlyResolved = getRecentlyResolved(
+      interventions,
+      metaConfig.last_tuned,
+    );
+
+    if (recentlyResolved.length > 0 || cycleCount % (crystallizeInterval * 5) === 0) {
+      const result = tune(
+        recentlyResolved,
+        patterns,
+        rules,
+        metaConfig,
+        reflectConfig,
+        pipelineLog,
+      );
+
+      savePatterns(cwd, result.patterns, pipelineLog);
+      saveReflexRules(cwd, result.rules, pipelineLog);
+      saveMetaConfig(cwd, result.metaConfig, pipelineLog);
+
+      if (result.changes.length > 0) {
+        pipelineLog(
+          `[Autonomic] Phase 5 complete: ${result.changes.join(', ')}`,
+        );
+      }
+    }
+  } catch (err) {
+    pipelineLog(`[Autonomic] Phase 5 error: ${err}`);
+  }
+
+  // Periodic observation log cleanup
+  if (cycleCount % (crystallizeInterval * 10) === 0) {
+    truncateObservations(cwd, 1000, pipelineLog);
+  }
+
+  pipelineLog('[Autonomic] Pipeline complete');
+}
+
+// ============================================
 // Main Continuous Loop
 // ============================================
 
@@ -282,19 +525,12 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
   let lastProcessedIndex = -1;
   let lastSeenTranscriptIndex = -1;
   let lastActivityAt = Date.now();
+  let autonomicCycleCount = 0;
 
-  const checkInterval = parseInt(
-    process.env.SUBNOTES_CHECK_INTERVAL || '1000',
-    10,
-  );
-  const minMessages = parseInt(
-    process.env.SUBNOTES_MIN_MESSAGES || '1',
-    10,
-  );
-  const idleTimeoutMs = parseInt(
-    process.env.SUBNOTES_IDLE_TIMEOUT || '1800000',
-    10,
-  );
+  const config = loadConfig(payload.cwd);
+  const checkInterval = config.checkIntervalMs;
+  const minMessages = config.minMessages;
+  const idleTimeoutMs = config.idleTimeoutMs;
 
   log('Starting continuous loop...');
   log(`Check interval: ${checkInterval}ms`);
@@ -325,10 +561,7 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
         let baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
 
         const transcriptText = formatTranscriptForAgent(newEntries);
-        const maxContinuations = parseInt(
-          process.env.SUBNOTES_MAX_CONTINUATIONS || '2',
-          10,
-        );
+        const maxContinuations = config.maxContinuations;
 
         let currentUserMessage = `${transcriptText}
 
@@ -397,6 +630,23 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
 
         lastProcessedIndex = latestIndex;
         log(`✓ Processed up to index ${lastProcessedIndex}`);
+
+        // ========================================
+        // Autonomic Pipeline (Phases 2-5)
+        // ========================================
+        if (isAutonomicEnabled(payload.cwd)) {
+          try {
+            await runAutonomicPipeline(
+              payload,
+              newEntries,
+              autonomicCycleCount,
+              log,
+            );
+          } catch (autoErr) {
+            log(`Autonomic pipeline error (non-fatal): ${autoErr}`);
+          }
+          autonomicCycleCount++;
+        }
       }
 
       if (

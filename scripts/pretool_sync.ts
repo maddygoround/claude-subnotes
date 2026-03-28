@@ -1,9 +1,23 @@
 #!/usr/bin/env tsx
 /**
- * PreToolUse Memory Sync Script
+ * PreToolUse Gating Layer
  *
- * Lightweight hook that checks for local SubNotes changes mid-workflow.
- * Runs before each tool use to inject any new memory changes.
+ * This is the subconscious's enforcement point. Every tool call passes
+ * through here before executing. The hook can:
+ *
+ * 1. PASS — no intervention, existing memory/message sync only
+ * 2. WHISPER — inject advisory context (additionalContext)
+ * 3. ASK — request user confirmation (permissionDecision: "ask")
+ * 4. DENY — block the tool call (permissionDecision: "deny")
+ * 5. CORRECT — modify tool input (updatedInput)
+ *
+ * Systems involved:
+ * - System 5 (Sentinel): Real-time counter-based warnings
+ * - System 2 (Reflex Matcher): Pattern-based rule matching
+ * - System 3 (Intervention Tracker): Records every intervention
+ *
+ * PERFORMANCE: Must complete in < 5 seconds (hook timeout).
+ * No LLM calls. All reads are fast local JSON.
  */
 
 import {
@@ -21,7 +35,26 @@ import {
   saveSyncState,
   loadLocalMemory,
   getMode,
+  isAutonomicEnabled,
+  loadConfig,
 } from './conversation_utils.js';
+import {
+  loadSentinelState,
+  checkSentinelTriggers,
+  recordSentinelWarnings,
+  saveSentinelState,
+  formatSentinelWarnings,
+} from './framework/sentinel.js';
+import {
+  loadReflexRules,
+  loadMetaConfig,
+  matchReflexRules,
+  recordRuleFired,
+  saveReflexRules,
+  appendIntervention,
+  createInterventionRecord,
+} from './autonomic/index.js';
+import type { HookAction, InterventionType } from './autonomic/types.js';
 
 const debug = createDebugLogger('pretool');
 
@@ -30,7 +63,95 @@ interface PreToolInput {
   cwd: string;
   hook_event_name: string;
   tool_name?: string;
+  tool_input?: unknown;
 }
+
+// ============================================
+// Hook Output Builders
+// ============================================
+
+interface HookOutput {
+  suppressOutput: boolean;
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse';
+    additionalContext?: string;
+    permissionDecision?: 'allow' | 'deny' | 'ask';
+    updatedInput?: Record<string, unknown>;
+    systemMessage?: string;
+  };
+}
+
+function buildPassOutput(context?: string): HookOutput {
+  const output: HookOutput = {
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+    },
+  };
+  if (context) {
+    output.hookSpecificOutput.additionalContext = context;
+  }
+  return output;
+}
+
+function buildWhisperOutput(
+  whisperContent: string,
+  additionalContext?: string,
+): HookOutput {
+  const parts = [whisperContent];
+  if (additionalContext) parts.push(additionalContext);
+
+  return {
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: parts.join('\n\n'),
+    },
+  };
+}
+
+function buildDenyOutput(message: string): HookOutput {
+  return {
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      systemMessage:
+        `<subconscious_block>\n${message}\n</subconscious_block>`,
+    },
+  };
+}
+
+function buildAskOutput(message: string): HookOutput {
+  return {
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'ask',
+      systemMessage:
+        `<subconscious_ask>\n${message}\n</subconscious_ask>`,
+    },
+  };
+}
+
+function buildCorrectOutput(
+  updatedInput: Record<string, unknown>,
+  message: string,
+): HookOutput {
+  return {
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      updatedInput,
+      additionalContext:
+        `<subconscious_correction>\n${message}\n</subconscious_correction>`,
+    },
+  };
+}
+
+// ============================================
+// Main Hook Logic
+// ============================================
 
 async function main(): Promise<void> {
   const mode = getMode();
@@ -46,9 +167,13 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    debug(`PreToolUse for tool: ${hookInput.tool_name}`);
+    const toolName = hookInput.tool_name || 'unknown';
+    debug(`PreToolUse for tool: ${toolName}`);
 
-    // Load state
+    // ========================================
+    // Phase 1: Existing memory/message sync
+    // ========================================
+
     const state = loadSyncState(hookInput.cwd, hookInput.session_id);
 
     if (!state.lastBlockValues) {
@@ -56,7 +181,6 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    // Load local memory and detect changes
     const blocks = loadLocalMemory(hookInput.cwd, debug);
     const changedBlocks = detectChangedBlocks(blocks, state.lastBlockValues);
     const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
@@ -64,15 +188,10 @@ async function main(): Promise<void> {
     debug(`Changed blocks: ${changedBlocks.length}`);
     debug(`Unread messages: ${unreadMessages.length}`);
 
-    if (changedBlocks.length === 0 && unreadMessages.length === 0) {
-      debug('No updates or messages, exiting silently');
-      process.exit(0);
-    }
-
+    // Build the existing memory/message context sections
     const updateSections: string[] = [];
 
     if (changedBlocks.length > 0) {
-      // Format output (without the comment header — pretool uses compact format)
       const memoryUpdate = formatChangedBlocksAsXml(
         changedBlocks,
         state.lastBlockValues,
@@ -89,17 +208,172 @@ async function main(): Promise<void> {
       updateSections.push(whisperUpdate);
     }
 
-    // Update state
+    // Update sync state
     state.lastBlockValues = snapshotBlockValues(blocks);
     saveSyncState(hookInput.cwd, state);
 
-    const subnotes_update =
-      `<subnotes_update>\n` +
-      `${updateSections.join('\n\n')}\n` +
-      `</subnotes_update>`;
+    // ========================================
+    // Phase 2: Autonomic gating (Systems 2 + 5)
+    // ========================================
 
-    const contextParts = [subnotes_update];
+    let autonomicAction: HookAction = { type: 'pass' };
+    let sentinelContext = '';
 
+    if (isAutonomicEnabled(hookInput.cwd)) {
+      // === System 5: Sentinel checks ===
+      try {
+        const config = loadConfig(hookInput.cwd);
+        const sentinelState = loadSentinelState(hookInput.session_id);
+        const warnings = checkSentinelTriggers(
+          sentinelState,
+          config,
+          toolName,
+          hookInput.tool_input,
+        );
+
+        if (warnings.length > 0) {
+          sentinelContext = formatSentinelWarnings(warnings);
+          debug(`Sentinel warnings: ${warnings.length}`);
+
+          // Record sentinel warnings
+          const updatedSentinel = recordSentinelWarnings(sentinelState, warnings);
+          saveSentinelState(hookInput.session_id, updatedSentinel);
+
+          // Record sentinel interventions (System 3)
+          for (const warning of warnings) {
+            try {
+              const record = createInterventionRecord(
+                'sentinel' as InterventionType,
+                toolName,
+                hookInput.tool_input,
+                warning.message,
+                null,
+              );
+              appendIntervention(hookInput.cwd, record, debug);
+            } catch {
+              // Best-effort intervention recording
+            }
+          }
+        }
+      } catch (err) {
+        debug(`Sentinel error (non-fatal): ${err}`);
+      }
+
+      // === System 2: Reflex rule matching ===
+      try {
+        const rules = loadReflexRules(hookInput.cwd, debug);
+        if (rules.length > 0) {
+          const metaConfig = loadMetaConfig(hookInput.cwd, debug);
+          autonomicAction = matchReflexRules(
+            toolName,
+            hookInput.tool_input,
+            rules,
+            metaConfig,
+            debug,
+          );
+
+          // If a rule matched, update its fired counter + record intervention
+          if (autonomicAction.type !== 'pass' && autonomicAction.source_rule_id) {
+            try {
+              const allRules = loadReflexRules(hookInput.cwd, debug);
+              const ruleIdx = allRules.findIndex(
+                (r) => r.id === autonomicAction.source_rule_id,
+              );
+              if (ruleIdx >= 0) {
+                allRules[ruleIdx] = recordRuleFired(allRules[ruleIdx]);
+                saveReflexRules(hookInput.cwd, allRules, debug);
+              }
+            } catch {
+              // Best-effort rule update
+            }
+
+            // Record reflex intervention (System 3)
+            try {
+              const interventionType = autonomicAction.type as InterventionType;
+              const content =
+                autonomicAction.message || autonomicAction.content || '';
+              const record = createInterventionRecord(
+                interventionType,
+                toolName,
+                hookInput.tool_input,
+                content,
+                autonomicAction.source_rule_id,
+              );
+              appendIntervention(hookInput.cwd, record, debug);
+            } catch {
+              // Best-effort intervention recording
+            }
+          }
+        }
+      } catch (err) {
+        debug(`Reflex matching error (non-fatal): ${err}`);
+      }
+    }
+
+    // ========================================
+    // Phase 3: Build final output
+    // ========================================
+
+    // Priority: deny > ask > correct > whisper > pass
+    if (autonomicAction.type === 'deny') {
+      debug(`DENY: ${autonomicAction.message}`);
+      console.log(JSON.stringify(buildDenyOutput(autonomicAction.message!)));
+      return;
+    }
+
+    if (autonomicAction.type === 'ask') {
+      debug(`ASK: ${autonomicAction.message}`);
+      console.log(JSON.stringify(buildAskOutput(autonomicAction.message!)));
+      return;
+    }
+
+    if (autonomicAction.type === 'correct' && autonomicAction.updatedInput) {
+      debug(`CORRECT: ${autonomicAction.content}`);
+      console.log(
+        JSON.stringify(
+          buildCorrectOutput(
+            autonomicAction.updatedInput,
+            autonomicAction.content || 'Input auto-corrected by subconscious',
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Whisper / pass — build context with memory changes + sentinel + reflex whispers
+    const hasMemoryUpdates =
+      changedBlocks.length > 0 || unreadMessages.length > 0;
+    const hasWhisper = autonomicAction.type === 'whisper';
+    const hasSentinel = sentinelContext.length > 0;
+
+    if (!hasMemoryUpdates && !hasWhisper && !hasSentinel) {
+      debug('No updates, whispers, or warnings — exiting silently');
+      process.exit(0);
+    }
+
+    // Build combined context
+    const contextParts: string[] = [];
+
+    // Memory updates
+    if (updateSections.length > 0) {
+      contextParts.push(
+        `<subnotes_update>\n${updateSections.join('\n\n')}\n</subnotes_update>`,
+      );
+    }
+
+    // Sentinel warnings
+    if (hasSentinel) {
+      contextParts.push(sentinelContext);
+    }
+
+    // Reflex whisper
+    if (hasWhisper && autonomicAction.content) {
+      contextParts.push(
+        `<subconscious_whisper>\n${autonomicAction.content}\n</subconscious_whisper>`,
+      );
+    }
+
+    // Instructions for Claude
     if (unreadMessages.length > 0) {
       contextParts.push(generateForegroundInstruction(unreadMessages));
     }
@@ -110,17 +384,8 @@ async function main(): Promise<void> {
       );
     }
 
-    const contextWithInstruction = contextParts.join('\n\n');
-
-    const output: Record<string, unknown> = {
-      suppressOutput: true,
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        additionalContext: contextWithInstruction,
-      },
-    };
-
-    console.log(JSON.stringify(output));
+    const fullContext = contextParts.join('\n\n');
+    console.log(JSON.stringify(buildPassOutput(fullContext)));
   } catch (error) {
     debug(`Error: ${error}`);
     process.exit(0);

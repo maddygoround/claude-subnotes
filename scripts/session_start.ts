@@ -24,6 +24,7 @@ import {
   getSdkToolsMode,
   saveSyncState,
   loadLocalMemory,
+  loadConfig,
   ensureConfigFile,
   ensureContinuousWorker,
 } from './conversation_utils.js';
@@ -59,8 +60,9 @@ async function main(): Promise<void> {
     // Initialize or load local memory
     loadLocalMemory(hookInput.cwd, log);
 
-    // Ensure config.json exists with defaults
+    // Ensure config.json exists with defaults and load config
     ensureConfigFile(hookInput.cwd, log);
+    loadConfig(hookInput.cwd);  // Populate cache for downstream use
 
     // Save initial session state
     saveSyncState(
@@ -73,7 +75,7 @@ async function main(): Promise<void> {
     );
 
     // Start the continuous worker (single execution model).
-    const sdkToolsMode = getSdkToolsMode();
+    const sdkToolsMode = getSdkToolsMode(hookInput.cwd);
     const worker = ensureContinuousWorker(
       hookInput.session_id,
       hookInput.cwd,
