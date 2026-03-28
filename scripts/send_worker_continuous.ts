@@ -199,6 +199,25 @@ function cleanupPidFile(sessionId: string, cwd: string): void {
 }
 
 // ============================================
+// Continuation Thought Extraction
+// ============================================
+
+interface ContinuationResult {
+  text: string;
+  continuationReason: string | null;
+}
+
+function extractContinuationThought(response: string): ContinuationResult {
+  const match = response.match(/<continue_thought>([\s\S]*?)<\/continue_thought>/);
+  if (!match) {
+    return { text: response, continuationReason: null };
+  }
+  const continuationReason = match[1].trim();
+  const text = response.replace(/<continue_thought>[\s\S]*?<\/continue_thought>/g, '').trim();
+  return { text, continuationReason };
+}
+
+// ============================================
 // System Prompt
 // ============================================
 
@@ -232,6 +251,7 @@ function buildSystemPrompt(
     `You are the subconscious layer, not the foreground assistant.\n` +
     `Do not ask the user questions directly and do not invent visible subagents.\n` +
     `If clarification is needed, frame it as a suggestion for Claude Code or provide a fallback assumption.\n` +
+    `If you have a sub-question or follow-up thought that needs resolution before concluding, emit it as <continue_thought>your question or follow-up here</continue_thought> anywhere in your response — the worker will re-invoke you with that as the next input (max 2 continuations). Omit the tag when your thought is complete.\n` +
     `Tool results may include subconscious signals such as clarification_needed, assumption, risk, and boundary. Use them as internal scaffolding for your reasoning.\n` +
     `Update memory only when it adds durable value.\n` +
     `</runtime_context>\n\n` +
@@ -257,7 +277,7 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
   let lastActivityAt = Date.now();
 
   const checkInterval = parseInt(
-    process.env.SUBNOTES_CHECK_INTERVAL || '5000',
+    process.env.SUBNOTES_CHECK_INTERVAL || '1000',
     10,
   );
   const minMessages = parseInt(
@@ -295,44 +315,63 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
         log(`Processing ${newEntries.length} new transcript entries...`);
 
         let memoryBlocks = loadLocalMemory(payload.cwd, log);
-        const baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
+        let baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
 
         const transcriptText = formatTranscriptForAgent(newEntries);
-        const userMessage = `${transcriptText}
-
-Process these new messages. Update memory blocks if you observe patterns, preferences, or important context. Write to guidance only if you have something useful to surface.`;
-
-        const result = await runAgentLoop(
-          {
-            cwd: payload.cwd,
-            sdkToolsMode: payload.sdkToolsMode,
-            systemPromptBuilder: () =>
-              buildSystemPrompt(memoryBlocks, payload.cwd, payload.sdkToolsMode),
-            userMessage,
-            log,
-          },
-          memoryBlocks,
+        const maxContinuations = parseInt(
+          process.env.SUBNOTES_MAX_CONTINUATIONS || '2',
+          10,
         );
 
-        memoryBlocks = result.memoryBlocks;
+        let currentUserMessage = `${transcriptText}
 
-        if (result.memoriesUpdated) {
-          saveLocalMemory(payload.cwd, memoryBlocks, log, {
-            baseBlocks: baseMemoryBlocks,
-          });
-          log('✓ Saved updated memory blocks');
+Process these new messages. Update memory blocks if you observe patterns, preferences, or important context. Write to guidance only if you have something useful to surface.`;
+        let finalResponse = '';
+
+        for (let continuation = 0; continuation <= maxContinuations; continuation++) {
+          const result = await runAgentLoop(
+            {
+              cwd: payload.cwd,
+              sdkToolsMode: payload.sdkToolsMode,
+              systemPromptBuilder: () =>
+                buildSystemPrompt(memoryBlocks, payload.cwd, payload.sdkToolsMode),
+              userMessage: currentUserMessage,
+              log,
+            },
+            memoryBlocks,
+          );
+
+          memoryBlocks = result.memoryBlocks;
+
+          if (result.memoriesUpdated) {
+            saveLocalMemory(payload.cwd, memoryBlocks, log, {
+              baseBlocks: baseMemoryBlocks,
+            });
+            baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
+            log('✓ Saved updated memory blocks');
+          }
+
+          const { text: cleanResponse, continuationReason } =
+            extractContinuationThought(result.assistantResponse);
+          finalResponse = cleanResponse;
+
+          if (!continuationReason || continuation >= maxContinuations) {
+            if (continuationReason && continuation >= maxContinuations) {
+              log(`↩ Max continuations reached (${maxContinuations}), concluding thought`);
+            }
+            break;
+          }
+
+          log(`↩ Self-continuing thought (${continuation + 1}/${maxContinuations}): ${continuationReason.slice(0, 120)}`);
+          currentUserMessage = `Continuing your own thought from the previous cycle:\n\n"${continuationReason}"\n\nResolve this and conclude. If still unresolved and essential, you may continue once more.`;
         }
 
-        if (result.assistantResponse.trim()) {
-          appendAgentMessage(
-            payload.cwd,
-            result.assistantResponse,
-            log,
-          );
+        if (finalResponse.trim()) {
+          appendAgentMessage(payload.cwd, finalResponse, log);
           log('✓ Appended agent message');
         }
 
-        lastProcessedIndex += newEntries.length;
+        lastProcessedIndex = latestIndex;
         log(`✓ Processed up to index ${lastProcessedIndex}`);
       }
 
