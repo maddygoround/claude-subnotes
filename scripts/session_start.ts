@@ -86,7 +86,7 @@ async function main(): Promise<void> {
       log('Continuous worker already running');
     }
 
-    // Clean up any existing <letta> or <subnotes> section from CLAUDE.md
+    // Clean up any existing <subnotes> section from CLAUDE.md
     log('Cleaning up any legacy CLAUDE.md content...');
     cleanSubNotesFromClaudeMd(hookInput.cwd);
 
