@@ -5,6 +5,9 @@
  * Appends transcript entries to the continuous transcript file.
  * Called by UserPromptSubmit and PostToolUse hooks to stream conversation data
  * to the continuous agent.
+ *
+ * Also updates Sentinel state (System 5) on PostToolUse events
+ * for real-time thrashing/loop detection.
  */
 
 import { readHookInput } from './framework/index.js';
@@ -14,7 +17,14 @@ import {
   getMode,
   getSdkToolsMode,
   ensureContinuousWorker,
+  isAutonomicEnabled,
+  loadConfig,
 } from './conversation_utils.js';
+import {
+  loadSentinelState,
+  updateSentinelState,
+  saveSentinelState,
+} from './framework/sentinel.js';
 
 interface StreamHookInput {
   session_id: string;
@@ -98,6 +108,28 @@ async function main(): Promise<void> {
     };
 
     appendTranscriptEntry(hookInput.cwd, hookInput.session_id, entry);
+
+    // Update Sentinel state on PostToolUse events (System 5)
+    if (
+      eventName === 'PostToolUse' &&
+      isAutonomicEnabled(hookInput.cwd) &&
+      hookInput.tool_name
+    ) {
+      try {
+        const config = loadConfig(hookInput.cwd);
+        const sentinelState = loadSentinelState(hookInput.session_id);
+        const updatedState = updateSentinelState(
+          sentinelState,
+          hookInput.tool_name,
+          hookInput.tool_input,
+          hookInput.tool_response,
+          config,
+        );
+        saveSentinelState(hookInput.session_id, updatedState);
+      } catch {
+        // Sentinel updates are best-effort — never break the hook
+      }
+    }
   } catch (error) {
     // Fail silently - don't break hooks
     console.error(`Error streaming transcript: ${error}`);

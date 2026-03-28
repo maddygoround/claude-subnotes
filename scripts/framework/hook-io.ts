@@ -4,7 +4,7 @@
  * Consolidated I/O boilerplate shared across all hook scripts:
  * - stdin JSON reader
  * - File logger (timestamped)
- * - Debug logger (gated on SUBNOTES_DEBUG)
+ * - Debug logger (gated on config.json `debug` field)
  * - TTY writer
  */
 
@@ -114,11 +114,25 @@ export function createFileLogger(logFile: string): LogFn {
 }
 
 /**
- * Create a debug logger gated on SUBNOTES_DEBUG=1.
+ * Create a debug logger gated on the `debug` field in config.json.
  * Writes to stderr with a prefix.
+ *
+ * @param prefix - Label prepended to log lines
+ * @param cwd - Optional project directory; if provided, reads config directly.
+ *              If omitted, debug logging is disabled.
  */
-export function createDebugLogger(prefix: string): LogFn {
-  const enabled = process.env.SUBNOTES_DEBUG === '1';
+export function createDebugLogger(prefix: string, cwd?: string): LogFn {
+  if (!cwd) return noopLog;
+
+  let enabled = false;
+  try {
+    // Dynamic import to avoid circular dependency — loadConfig is lightweight
+    const { loadConfig } = require('../conversation_utils.js');
+    const cfg = loadConfig(cwd);
+    enabled = cfg?.debug === true;
+  } catch {
+    // Config not available yet — default to disabled
+  }
   if (!enabled) return noopLog;
 
   return (...args: unknown[]): void => {

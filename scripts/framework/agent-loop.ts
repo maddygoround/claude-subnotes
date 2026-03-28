@@ -7,6 +7,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { MemoryBlock, SdkToolsMode } from '../conversation_utils.js';
+import { loadConfig } from '../conversation_utils.js';
 import type { LogFn } from './hook-io.js';
 import { noopLog } from './hook-io.js';
 import { executeToolByName, getToolDefinitions } from './tools/index.js';
@@ -105,9 +106,10 @@ export async function runAgentLoop(
     log = noopLog,
   } = config;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const reflectConfig = loadConfig(cwd);
+  const apiKey = reflectConfig.anthropicApiKey;
   if (!apiKey) {
-    log('ERROR: ANTHROPIC_API_KEY is not set');
+    log('ERROR: anthropicApiKey is not set in config.json');
     return { memoriesUpdated: false, assistantResponse: '', memoryBlocks };
   }
 
@@ -126,7 +128,7 @@ export async function runAgentLoop(
 
     try {
       const response = await client.messages.create({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        model: reflectConfig.anthropicModel,
         max_tokens: maxTokens,
         system: systemPromptBuilder(),
         tools,
