@@ -3,11 +3,11 @@
   "version": "2.0.2",
   "description": "Claude's SubNotes - A persistent memory agent for Claude Code. Watches your sessions, learns your patterns, and whispers guidance back.",
   "author": {
-    "name": "m.rathod",
-    "url": "https://github.com/m-rathod"
+    "name": "maddygoround",
+    "url": "https://github.com/maddygoround"
   },
-  "homepage": "https://github.com/m-rathod/claude-reflect",
-  "repository": "https://github.com/m-rathod/claude-reflect",
+  "homepage": "https://github.com/maddygoround/claude-reflect",
+  "repository": "https://github.com/maddygoround/claude-reflect",
   "license": "MIT",
   "keywords": [
     "claude",

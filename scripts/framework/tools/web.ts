@@ -283,7 +283,7 @@ async function executeFetchWebpage(input: Record<string, unknown>): Promise<Tool
     {
       method: 'GET',
       headers: {
-        'user-agent': 'claude-subnotes/2.0',
+        'user-agent': 'claude-reflect/2.0',
         accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
       },
     },
