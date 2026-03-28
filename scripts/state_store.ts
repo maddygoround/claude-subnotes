@@ -206,23 +206,11 @@ export function readJsonFileWithFallback<T>(
   defaultValue: T,
   log?: StoreLogFn,
 ): T {
-  const candidates = [filePath, `${filePath}.bak`];
-
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) {
-      continue;
-    }
-
+  if (fs.existsSync(filePath)) {
     try {
-      const data = JSON.parse(fs.readFileSync(candidate, 'utf-8')) as T;
-      if (candidate !== filePath) {
-        log?.(
-          `Recovered ${path.basename(filePath)} from backup ${path.basename(candidate)}`,
-        );
-      }
-      return data;
+      return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
     } catch (error) {
-      log?.(`Failed to parse ${path.basename(candidate)}: ${error}`);
+      log?.(`Failed to parse ${path.basename(filePath)}: ${error}`);
     }
   }
 
@@ -236,12 +224,6 @@ export function writeJsonFileAtomic<T>(
 ): void {
   const serialized = JSON.stringify(value, null, 2);
   writeTextFileAtomic(filePath, serialized);
-
-  try {
-    writeTextFileAtomic(`${filePath}.bak`, serialized);
-  } catch (error) {
-    log?.(`Failed to refresh backup for ${path.basename(filePath)}: ${error}`);
-  }
 }
 
 export function updateJsonFile<T, R>(

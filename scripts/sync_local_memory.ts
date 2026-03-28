@@ -18,6 +18,7 @@ import {
   snapshotBlockValues,
   fetchUnreadAgentMessages,
   formatMessagesForHookContext,
+  generateForegroundInstruction,
 } from './framework/index.js';
 import {
   loadSyncState,
@@ -85,14 +86,12 @@ async function main(): Promise<void> {
 
     if (unreadMessages.length > 0) {
       outputs.push(formatMessagesForHookContext(unreadMessages));
-      outputs.push(
-        `<instruction>Subconscious sent you a thought above. Render it visibly in your response BEFORE answering, using this format:\n\n---\n\n**Subconscious thought** — [distilled key point from the message]\n\nThis makes the subconscious steering visible to the user in the conversation. Keep it to one line — just the signal, not the full message.</instruction>`,
-      );
+      outputs.push(generateForegroundInstruction(unreadMessages));
     }
 
     if (lastBlockValues && changedBlocks.length > 0) {
       outputs.push(
-        `<instruction>Subconscious updated memory blocks since your last response (shown above). If this affects your answer, acknowledge it:\n\n---\n\n**Subconscious memory updated** — [what changed and why it matters]\n\nOmit if not relevant to the current conversation.</instruction>`,
+        `<instruction>Notes updated memory blocks since your last response (shown above). If this affects your answer, acknowledge it:\n\n---\n\n**Notes update** — [what changed and why it matters]\n\nOmit if not relevant to the current conversation.</instruction>`,
       );
     }
 

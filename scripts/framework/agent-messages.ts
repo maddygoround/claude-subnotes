@@ -17,15 +17,18 @@ import type { LogFn } from './hook-io.js';
 // Types
 // ============================================
 
+export type AgentMessageType = 'reflect' | 'steer' | 'insight';
+
 export interface AgentMessage {
   id: string;
+  type?: AgentMessageType;
   text: string;
   date: string;
   read?: boolean;
 }
 
 function getAgentMessagesFile(cwd: string): string {
-  return path.join(getDurableStateDir(cwd), 'agent_messages.json');
+  return path.join(getDurableStateDir(cwd), 'conversation.json');
 }
 
 function normalizeAgentMessages(data: unknown): AgentMessage[] {
@@ -48,6 +51,7 @@ function normalizeAgentMessages(data: unknown): AgentMessage[] {
     })
     .map((message) => ({
       ...message,
+      type: ['reflect', 'steer', 'insight'].includes(message.type as string) ? message.type : 'reflect',
       read: Boolean(message.read),
     }));
 }
@@ -58,12 +62,13 @@ function normalizeAgentMessages(data: unknown): AgentMessage[] {
 
 /**
  * Append a message from the SubNotes agent.
- * Creates agent_messages.json if it doesn't exist.
+ * Creates conversation.json if it doesn't exist.
  */
 export function appendAgentMessage(
   cwd: string,
   text: string,
   log?: LogFn,
+  type: AgentMessageType = 'reflect',
 ): void {
   if (!text || !text.trim()) return;
 
@@ -81,6 +86,7 @@ export function appendAgentMessage(
         const nextMessages = [...messages];
         nextMessages.push({
           id: `msg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          type,
           text: text.trim(),
           date: new Date().toISOString(),
           read: false,
@@ -172,12 +178,43 @@ export function formatMessagesForStdout(messages: AgentMessage[]): string {
 export function formatMessagesForHookContext(messages: AgentMessage[]): string {
   const formattedMessages = messages.map((msg, index) => {
     const timestamp = msg.date || 'unknown';
+    const typeLabel = msg.type || 'reflect';
     const escapedText = escapeXmlContent(msg.text || '');
     const sequenceAttr = messages.length > 1
       ? ` sequence="${index + 1}/${messages.length}"`
       : '';
-    return `<subnotes_message from="Subconscious"${sequenceAttr} timestamp="${timestamp}">\n${escapedText}\n</subnotes_message>`;
+    return `<subnotes_message from="Notes" type="${typeLabel}"${sequenceAttr} timestamp="${timestamp}">\n${escapedText}\n</subnotes_message>`;
   });
 
   return formattedMessages.join('\n\n');
+}
+
+/**
+ * Generates the specific foreground instruction based on the message type.
+ * This instructs Claude Code to render the thought prominently.
+ */
+export function generateForegroundInstruction(messages: AgentMessage[]): string {
+  if (messages.length === 0) return '';
+  
+  // Find the highest priority message type in the unread queue
+  // Priority: insight > steer > reflect
+  let highestType: AgentMessageType = 'reflect';
+  if (messages.some(m => m.type === 'insight')) {
+    highestType = 'insight';
+  } else if (messages.some(m => m.type === 'steer')) {
+    highestType = 'steer';
+  }
+  
+  let prefix = '**Notes reflect**';
+  let description = '[observation]';
+  
+  if (highestType === 'insight') {
+    prefix = '**Notes insight**';
+    description = '[Identify the loop/issue] -> [Suggested pivot]';
+  } else if (highestType === 'steer') {
+    prefix = '**Notes steer**';
+    description = '[direction]';
+  }
+  
+  return `<instruction>Notes sent you a thought above. Render it visibly in your response BEFORE answering, using this format:\n\n---\n\n${prefix} — ${description}\n\nThis makes the context visible to the user. Keep it to one line — just the signal, not the full message.</instruction>`;
 }

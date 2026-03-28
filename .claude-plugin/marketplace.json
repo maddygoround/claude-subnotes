@@ -1,12 +1,12 @@
 {
-  "name": "claude-subnotes",
+  "name": "claude-reflect",
   "owner": {
     "name": "m.rathod",
     "url": "https://github.com/m-rathod"
   },
   "plugins": [
     {
-      "name": "claude-subnotes",
+      "name": "claude-reflect",
       "source": "./"
     }
   ]

@@ -20,6 +20,7 @@ import {
   createDebugLogger,
   fetchUnreadAgentMessages,
   formatMessagesForHookContext,
+  generateForegroundInstruction,
 } from './framework/index.js';
 import { getMode } from './conversation_utils.js';
 
@@ -56,12 +57,7 @@ async function main(): Promise<void> {
 
     const formattedMessages = formatMessagesForHookContext(unreadMessages);
 
-    const reason =
-      `${formattedMessages}\n\n` +
-      `<instruction>Subconscious sent you a thought above. Render it visibly in your response using this format:\n\n` +
-      `---\n\n` +
-      `**Subconscious thought** — [distilled key point from the message]\n\n` +
-      `Keep it to one line — just the signal, not the full message.</instruction>`;
+    const reason = `${formattedMessages}\n\n${generateForegroundInstruction(unreadMessages)}`;
 
     console.log(
       JSON.stringify({
