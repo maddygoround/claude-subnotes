@@ -1,4 +1,4 @@
-# Claude's SubNotes
+# Claude Reflect
 
 A persistent memory agent for Claude Code. A local Claude agent that watches your sessions, reads your files, builds up memory over time, and whispers guidance back.
 
@@ -55,8 +55,8 @@ After each response, the transcript is sent to a local Claude agent via the Anth
 Clone the repository:
 
 ```bash
-git clone https://github.com/m-rathod/claude-subnotes.git
-cd claude-subnotes
+git clone https://github.com/maddygoround/claude-reflect.git
+cd claude-reflect
 bun install
 ```
 
@@ -303,7 +303,7 @@ It can read files, search your codebase, and browse the web (read-only).
 Prefers explicit type annotations. Uses pnpm, not npm.
 </user_preferences>
 <project_context description="Codebase knowledge and architecture.">
-Working on claude-subnotes plugin. TypeScript, ESM modules.
+Working on claude-reflect plugin. TypeScript, ESM modules.
 </project_context>
 </subnotes_memory_blocks>
 ```

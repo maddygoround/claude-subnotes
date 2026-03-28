@@ -1,16 +1,16 @@
 {
-  "name": "claude-subnotes",
+  "name": "claude-reflect",
   "version": "2.0.2",
   "description": "Claude's SubNotes - A persistent memory agent for Claude Code. Watches your sessions, learns your patterns, and whispers guidance back.",
   "author": "m.rathod",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/m-rathod/claude-subnotes.git"
+    "url": "git+https://github.com/maddygoround/claude-reflect.git"
   },
-  "homepage": "https://github.com/m-rathod/claude-subnotes#readme",
+  "homepage": "https://github.com/maddygoround/claude-reflect#readme",
   "bugs": {
-    "url": "https://github.com/m-rathod/claude-subnotes/issues"
+    "url": "https://github.com/maddygoround/claude-reflect/issues"
   },
   "keywords": [
     "claude",
