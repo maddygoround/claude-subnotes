@@ -177,6 +177,15 @@ function buildHookAction(rule: ReflexRule, metaConfig: MetaConfig): HookAction {
       };
     }
 
+    case 'insight':
+      return {
+        type: 'insight',
+        content:
+          rule.action.content ||
+          `Insight detected (confidence: ${rule.confidence.toFixed(2)})`,
+        source_rule_id: rule.id,
+      };
+
     case 'whisper':
     default:
       return {
@@ -188,6 +197,7 @@ function buildHookAction(rule: ReflexRule, metaConfig: MetaConfig): HookAction {
       };
   }
 }
+
 
 /**
  * Increment the times_fired counter on a matched rule.

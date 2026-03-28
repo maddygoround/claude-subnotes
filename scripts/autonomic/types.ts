@@ -29,7 +29,12 @@ export interface PatternTrigger {
   context_pattern?: string;
 }
 
-export type SuggestedActionType = 'whisper' | 'block' | 'correct_input' | 'inject_context';
+export type SuggestedActionType =
+  | 'whisper'
+  | 'insight'
+  | 'block'
+  | 'correct_input'
+  | 'inject_context';
 
 export interface SuggestedAction {
   type: SuggestedActionType;
@@ -68,13 +73,18 @@ export interface PatternRecord {
 // Reflex Rules (System 2)
 // ============================================
 
-export type ReflexActionType = 'deny' | 'ask' | 'whisper' | 'correct';
+export type ReflexActionType =
+  | 'deny'
+  | 'ask'
+  | 'whisper'
+  | 'insight'
+  | 'correct';
 
 export interface ReflexAction {
   type: ReflexActionType;
   /** For deny/ask: the message to show */
   message?: string;
-  /** For whisper: the advisory content */
+  /** For whisper/insight: the advisory content */
   content?: string;
   /** For correct: the field in tool_input to modify */
   field?: string;
@@ -122,10 +132,16 @@ export interface ReflexRule {
 // Intervention Records (System 3)
 // ============================================
 
-export type InterventionType = 'whisper' | 'ask' | 'deny' | 'correct' | 'sentinel';
+export type InterventionType =
+  | 'whisper'
+  | 'insight'
+  | 'ask'
+  | 'deny'
+  | 'correct'
+  | 'sentinel';
 
 export type InterventionOutcome =
-  // Whisper outcomes
+  // Advisory outcomes
   | 'followed'
   | 'ignored'
   | 'acknowledged'
@@ -167,7 +183,7 @@ export interface InterventionRecord {
 // ============================================
 
 export interface ConfidenceThresholds {
-  /** Minimum confidence to emit a whisper (default 0.3) */
+  /** Minimum confidence to emit a whisper/insight advisory (default 0.3) */
   whisper: number;
   /** Minimum confidence to ask for user confirmation (default 0.6) */
   ask: number;
@@ -285,13 +301,19 @@ export interface ObservationEntry {
 // Hook Action Types (PreToolUse output)
 // ============================================
 
-export type HookActionType = 'deny' | 'ask' | 'whisper' | 'correct' | 'pass';
+export type HookActionType =
+  | 'deny'
+  | 'ask'
+  | 'whisper'
+  | 'insight'
+  | 'correct'
+  | 'pass';
 
 export interface HookAction {
   type: HookActionType;
   /** For deny/ask: reason message */
   message?: string;
-  /** For whisper: advisory content */
+  /** For whisper/insight: advisory content */
   content?: string;
   /** For correct: modified tool input */
   updatedInput?: Record<string, unknown>;

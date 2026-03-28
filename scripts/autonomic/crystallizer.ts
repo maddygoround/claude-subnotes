@@ -25,6 +25,42 @@ import { generateId } from './types.js';
 import { loadConfig, ReflectConfig } from '../conversation_utils.js';
 
 const noopLog: LogFn = () => {};
+const DAY_MS = 1000 * 60 * 60 * 24;
+
+/**
+ * Format a date as a human-readable relative time string.
+ */
+function formatRelativeTime(dateStr: string): string {
+  const now = new Date();
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return 'recently';
+
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(Math.abs(diffMs) / DAY_MS);
+
+  if (diffMs < 0) {
+    if (diffDays === 0) return 'later today';
+    if (diffDays === 1) return 'tomorrow';
+    if (diffDays < 7) return `in ${diffDays} days`;
+    return formatCalendarDate(dateStr);
+  }
+
+  if (diffDays === 0) return 'today';
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+  return formatCalendarDate(dateStr);
+}
+
+function formatCalendarDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return dateStr;
+
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
 
 // ============================================
 // Observation Clustering
@@ -207,6 +243,42 @@ interface CrystallizedPattern {
   suggested_action: SuggestedAction;
 }
 
+function buildHistoricalInsight(
+  type: PatternType,
+  cluster: ObservationCluster,
+  options: {
+    firstSeen?: string;
+    lastSeen?: string;
+    totalOccurrences?: number;
+  } = {},
+): string {
+  const actions: Record<PatternType, string> = {
+    failure_loop:
+      'This file has caused repeated failures. Re-read the full file and any related test files before editing.',
+    user_correction:
+      "The user has corrected work on this file before. Pay close attention to the user's preferred approach.",
+    thrashing:
+      'This file is being edited repeatedly. Step back and plan the changes before making more edits.',
+    recurring_gotcha:
+      "There's a recurring issue with this tool on this file. Consider using a different approach.",
+    preference_signal:
+      'The user has a preference around how this file is handled.',
+  };
+
+  const firstSeen = options.firstSeen ?? cluster.entries[0].timestamp;
+  const lastSeen =
+    options.lastSeen ?? cluster.entries[cluster.entries.length - 1].timestamp;
+  const totalOccurrences = options.totalOccurrences ?? cluster.entries.length;
+  const firstSeenSummary = `${formatRelativeTime(firstSeen)} (${formatCalendarDate(firstSeen)})`;
+  const lastSeenSummary = `${formatRelativeTime(lastSeen)} (${formatCalendarDate(lastSeen)})`;
+  const recurrenceSummary =
+    totalOccurrences > 1
+      ? `This pattern first showed up ${firstSeenSummary} and has now appeared ${totalOccurrences} times, most recently ${lastSeenSummary}.`
+      : `This pattern first showed up ${firstSeenSummary}.`;
+
+  return `${actions[type]} ${recurrenceSummary}`;
+}
+
 /**
  * Use a cheap LLM to name and classify a cluster into a pattern.
  * Falls back to heuristic naming if the API call fails.
@@ -241,14 +313,23 @@ async function namePatternWithLLM(
             `Analyze this cluster of ${cluster.entries.length} observations and generate a pattern record:\n\n` +
             `${clusterSummary}\n\n` +
             `Respond with JSON: { "name": "short descriptive name", "type": "${cluster.type_hint}", ` +
-            `"suggested_action": { "type": "whisper", "content": "one-sentence contextual warning" } }`,
+            `"suggested_action": { "type": "insight", "content": "A conversational insight that explains the history of this pattern and why it is resurfacing now. Ground it in the timestamps and counts provided. Mention concrete first-seen and last-seen dates, not only relative terms like 'yesterday'." } }`,
+
         },
       ],
     });
 
-    const text =
+    let text =
       response.content[0].type === 'text' ? response.content[0].text : '';
-    const parsed = JSON.parse(text.trim());
+
+    // Strip markdown fences if present
+    text = text.replace(/```json\n?/, '').replace(/\n?```/, '').trim();
+
+    const parsed = JSON.parse(text);
+    const parsedInsightContent =
+      typeof parsed?.suggested_action?.content === 'string'
+        ? parsed.suggested_action.content.trim()
+        : '';
 
     return {
       name: parsed.name || heuristicPatternName(cluster).name,
@@ -259,9 +340,10 @@ async function namePatternWithLLM(
           ? deriveFilePattern(cluster.entries.flatMap((e) => e.files))
           : undefined,
       },
-      suggested_action: parsed.suggested_action || {
-        type: 'whisper' as const,
-        content: `Pattern detected: ${parsed.name || cluster.type_hint}`,
+      suggested_action: {
+        type: 'insight',
+        content:
+          parsedInsightContent || buildHistoricalInsight(cluster.type_hint, cluster),
       },
     };
   } catch (error) {
@@ -286,14 +368,6 @@ function heuristicPatternName(cluster: ObservationCluster): CrystallizedPattern 
     preference_signal: `Preference pattern for ${filename}`,
   };
 
-  const actions: Record<PatternType, string> = {
-    failure_loop: `This file has caused repeated failures. Re-read the full file and any related test files before editing.`,
-    user_correction: `The user has corrected work on this file before. Pay close attention to the user's preferred approach.`,
-    thrashing: `This file is being edited repeatedly. Step back and plan the changes before making more edits.`,
-    recurring_gotcha: `There's a recurring issue with this tool on this file. Consider using a different approach.`,
-    preference_signal: `The user has a preference around how this file is handled.`,
-  };
-
   return {
     name: names[cluster.type_hint],
     type: cluster.type_hint,
@@ -304,8 +378,8 @@ function heuristicPatternName(cluster: ObservationCluster): CrystallizedPattern 
         : undefined,
     },
     suggested_action: {
-      type: 'whisper',
-      content: actions[cluster.type_hint],
+      type: 'insight',
+      content: buildHistoricalInsight(cluster.type_hint, cluster),
     },
   };
 }
@@ -323,6 +397,9 @@ function summarizeCluster(cluster: ObservationCluster): string {
     .map((e) => e.error!)
     .slice(0, 3);
 
+  const firstSeenStr = cluster.entries[0].timestamp;
+  const lastSeenStr = cluster.entries[cluster.entries.length - 1].timestamp;
+
   return [
     `Tool(s): ${tools.join(', ')}`,
     `File(s): ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5} more)` : ''}`,
@@ -332,7 +409,8 @@ function summarizeCluster(cluster: ObservationCluster): string {
     `Has user corrections: ${cluster.has_user_correction}`,
     `Type hint: ${cluster.type_hint}`,
     errors.length > 0 ? `Sample errors: ${errors.join('; ')}` : '',
-    `Time span: ${cluster.entries[0].timestamp} to ${cluster.entries[cluster.entries.length - 1].timestamp}`,
+    `First seen: ${formatRelativeTime(firstSeenStr)} (${firstSeenStr})`,
+    `Last seen: ${formatRelativeTime(lastSeenStr)} (${lastSeenStr})`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -378,14 +456,30 @@ export async function crystallize(
       // Update existing pattern with new evidence
       const idx = updatedPatterns.findIndex((p) => p.id === existingMatch.id);
       if (idx >= 0) {
+        const totalEvidence = existingMatch.evidence_count + cluster.entries.length;
+        const clusterLastSeen =
+          cluster.entries[cluster.entries.length - 1].timestamp;
+        const refreshedSuggestedAction =
+          existingMatch.suggested_action.type === 'insight'
+            ? {
+                ...existingMatch.suggested_action,
+                content: buildHistoricalInsight(existingMatch.type, cluster, {
+                  firstSeen: existingMatch.first_seen,
+                  lastSeen: clusterLastSeen,
+                  totalOccurrences: totalEvidence,
+                }),
+              }
+            : existingMatch.suggested_action;
+
         updatedPatterns[idx] = {
           ...existingMatch,
-          evidence_count: existingMatch.evidence_count + cluster.entries.length,
+          evidence_count: totalEvidence,
           confidence: Math.min(
             config.crystallizerMaxConfidence,
             existingMatch.confidence + config.crystallizerConfidenceBump * cluster.entries.length,
           ),
-          last_seen: new Date().toISOString(),
+          last_seen: clusterLastSeen,
+          suggested_action: refreshedSuggestedAction,
         };
         log(
           `Updated pattern "${existingMatch.name}" — evidence: ${updatedPatterns[idx].evidence_count}, ` +
@@ -403,7 +497,7 @@ export async function crystallize(
         evidence_count: cluster.entries.length,
         confidence: config.crystallizerInitialConfidence + config.crystallizerConfidenceBump * (cluster.entries.length - config.crystallizerMinClusterSize),
         first_seen: cluster.entries[0].timestamp,
-        last_seen: new Date().toISOString(),
+        last_seen: cluster.entries[cluster.entries.length - 1].timestamp,
         suggested_action: crystallized.suggested_action,
       };
 

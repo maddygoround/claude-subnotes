@@ -26,6 +26,14 @@ import { ReflectConfig } from '../conversation_utils.js';
 
 const noopLog: LogFn = () => {};
 
+function isAdvisoryIntervention(intervention: InterventionRecord): boolean {
+  return (
+    intervention.type === 'whisper' ||
+    intervention.type === 'insight' ||
+    intervention.type === 'sentinel'
+  );
+}
+
 // ============================================
 // Confidence Adjustment Deltas
 // ============================================
@@ -142,24 +150,22 @@ function adjustThresholds(
   };
 
   // Count outcomes by intervention type
-  const whisperOutcomes = resolvedInterventions.filter(
-    (i) => i.type === 'whisper' || i.type === 'sentinel',
-  );
+  const advisoryOutcomes = resolvedInterventions.filter(isAdvisoryIntervention);
   const denyOutcomes = resolvedInterventions.filter((i) => i.type === 'deny');
   const allOutcomes = resolvedInterventions;
 
-  // If >40% of whispers are being ignored → raise whisper threshold
-  if (whisperOutcomes.length >= 5) {
-    const ignoredCount = whisperOutcomes.filter(
+  // If >40% of soft advisories are being ignored → raise whisper threshold
+  if (advisoryOutcomes.length >= 5) {
+    const ignoredCount = advisoryOutcomes.filter(
       (i) => i.outcome === 'ignored',
     ).length;
-    const ignoreRate = ignoredCount / whisperOutcomes.length;
+    const ignoreRate = ignoredCount / advisoryOutcomes.length;
 
     if (ignoreRate > reflectConfig.tunerIgnoreRateThreshold) {
       const oldThreshold = updated.thresholds.whisper;
       updated.thresholds.whisper = Math.min(0.6, oldThreshold + 0.05);
       log(
-        `Whisper ignore rate ${(ignoreRate * 100).toFixed(0)}% > ${(reflectConfig.tunerIgnoreRateThreshold * 100).toFixed(0)}% — ` +
+        `Advisory ignore rate ${(ignoreRate * 100).toFixed(0)}% > ${(reflectConfig.tunerIgnoreRateThreshold * 100).toFixed(0)}% — ` +
           `raised whisper threshold: ${oldThreshold.toFixed(2)} → ${updated.thresholds.whisper.toFixed(2)}`,
       );
     }
@@ -210,7 +216,7 @@ function adjustThresholds(
 // ============================================
 
 /**
- * Track which whisper phrasings lead to "followed" vs "ignored" outcomes.
+ * Track which advisory phrasings lead to "followed" vs "ignored" outcomes.
  */
 function evolveCommunicationStyle(
   resolvedInterventions: InterventionRecord[],
@@ -226,7 +232,7 @@ function evolveCommunicationStyle(
   };
 
   for (const intervention of resolvedInterventions) {
-    if (intervention.type !== 'whisper' && intervention.type !== 'sentinel') continue;
+    if (!isAdvisoryIntervention(intervention)) continue;
     if (!intervention.outcome) continue;
 
     // Classify the phrasing style
@@ -237,7 +243,14 @@ function evolveCommunicationStyle(
       style = 'question';
     } else if (content.includes('do not') || content.includes("don't") || content.includes('stop')) {
       style = 'directive';
-    } else if (content.includes('last time') || content.includes('previously') || content.includes('pattern')) {
+    } else if (
+      content.includes('last time') ||
+      content.includes('previously') ||
+      content.includes('pattern') ||
+      content.includes('first showed up') ||
+      content.includes('most recently') ||
+      content.includes('history')
+    ) {
       style = 'contextual';
     } else if (content.length < 100) {
       style = 'short';

@@ -6,7 +6,7 @@
  * through here before executing. The hook can:
  *
  * 1. PASS — no intervention, existing memory/message sync only
- * 2. WHISPER — inject advisory context (additionalContext)
+ * 2. WHISPER / INSIGHT — inject advisory context (additionalContext)
  * 3. ASK — request user confirmation (permissionDecision: "ask")
  * 4. DENY — block the tool call (permissionDecision: "deny")
  * 5. CORRECT — modify tool input (updatedInput)
@@ -94,20 +94,8 @@ function buildPassOutput(context?: string): HookOutput {
   return output;
 }
 
-function buildWhisperOutput(
-  whisperContent: string,
-  additionalContext?: string,
-): HookOutput {
-  const parts = [whisperContent];
-  if (additionalContext) parts.push(additionalContext);
-
-  return {
-    suppressOutput: true,
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      additionalContext: parts.join('\n\n'),
-    },
-  };
+function buildTaggedContext(tagName: string, content: string): string {
+  return `<${tagName}>\n${content}\n</${tagName}>`;
 }
 
 function buildDenyOutput(message: string): HookOutput {
@@ -116,8 +104,7 @@ function buildDenyOutput(message: string): HookOutput {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      systemMessage:
-        `<subconscious_block>\n${message}\n</subconscious_block>`,
+      systemMessage: buildTaggedContext('subconscious_block', message),
     },
   };
 }
@@ -128,8 +115,7 @@ function buildAskOutput(message: string): HookOutput {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'ask',
-      systemMessage:
-        `<subconscious_ask>\n${message}\n</subconscious_ask>`,
+      systemMessage: buildTaggedContext('subconscious_ask', message),
     },
   };
 }
@@ -143,8 +129,7 @@ function buildCorrectOutput(
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       updatedInput,
-      additionalContext:
-        `<subconscious_correction>\n${message}\n</subconscious_correction>`,
+      additionalContext: buildTaggedContext('subconscious_correction', message),
     },
   };
 }
@@ -314,7 +299,7 @@ async function main(): Promise<void> {
     // Phase 3: Build final output
     // ========================================
 
-    // Priority: deny > ask > correct > whisper > pass
+    // Priority: deny > ask > correct > soft advisory > pass
     if (autonomicAction.type === 'deny') {
       debug(`DENY: ${autonomicAction.message}`);
       console.log(JSON.stringify(buildDenyOutput(autonomicAction.message!)));
@@ -340,14 +325,15 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Whisper / pass — build context with memory changes + sentinel + reflex whispers
+    // Whisper / insight / pass — build context with memory changes + sentinel + reflex advisories
     const hasMemoryUpdates =
       changedBlocks.length > 0 || unreadMessages.length > 0;
+    const hasInsight = autonomicAction.type === 'insight';
     const hasWhisper = autonomicAction.type === 'whisper';
     const hasSentinel = sentinelContext.length > 0;
 
-    if (!hasMemoryUpdates && !hasWhisper && !hasSentinel) {
-      debug('No updates, whispers, or warnings — exiting silently');
+    if (!hasMemoryUpdates && !hasInsight && !hasWhisper && !hasSentinel) {
+      debug('No updates, advisories, or warnings — exiting silently');
       process.exit(0);
     }
 
@@ -366,10 +352,17 @@ async function main(): Promise<void> {
       contextParts.push(sentinelContext);
     }
 
+    // Reflex insight
+    if (hasInsight && autonomicAction.content) {
+      contextParts.push(
+        buildTaggedContext('subconscious_insight', autonomicAction.content),
+      );
+    }
+
     // Reflex whisper
     if (hasWhisper && autonomicAction.content) {
       contextParts.push(
-        `<subconscious_whisper>\n${autonomicAction.content}\n</subconscious_whisper>`,
+        buildTaggedContext('subconscious_whisper', autonomicAction.content),
       );
     }
 
