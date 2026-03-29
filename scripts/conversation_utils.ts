@@ -24,6 +24,8 @@ import {
   escapeXmlAttribute,
   escapeXmlContent,
 } from './framework/utils/xml.js';
+import { isProcessRunning } from './framework/utils/process.js';
+import { stringifyUnknown } from './framework/utils/serialization.js';
 
 export { escapeRegex, escapeXmlAttribute, escapeXmlContent };
 
@@ -1597,17 +1599,6 @@ function getLegacyContinuousWorkerPidFile(sessionId: string): string {
   return path.join(getTempStateDir(), `continuous-worker-${sessionId}.pid`);
 }
 
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    // EPERM means process exists but we don't have permission to signal it.
-    return err.code === 'EPERM';
-  }
-}
-
 function removePidFile(pidFile: string, log: LogFn): void {
   try {
     if (fs.existsSync(pidFile)) {
@@ -1808,17 +1799,6 @@ interface ClaudeTranscriptRecord {
   };
 }
 
-function stringifyTranscriptValue(value: unknown): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 function collectTextBlocks(blocks: ClaudeTranscriptContentBlock[]): string[] {
   const parts: string[] = [];
 
@@ -1851,7 +1831,7 @@ function extractToolResultText(value: unknown): string {
     const parts = value
       .map((item) => {
         if (!item || typeof item !== 'object') {
-          return stringifyTranscriptValue(item);
+          return stringifyUnknown(item);
         }
 
         const block = item as { type?: unknown; text?: unknown };
@@ -1859,7 +1839,7 @@ function extractToolResultText(value: unknown): string {
           return block.text;
         }
 
-        return stringifyTranscriptValue(item);
+        return stringifyUnknown(item);
       })
       .map((part) => part.trim())
       .filter(Boolean);
@@ -1869,7 +1849,7 @@ function extractToolResultText(value: unknown): string {
     }
   }
 
-  return stringifyTranscriptValue(value);
+  return stringifyUnknown(value);
 }
 
 function buildToolEventContent(
@@ -1880,7 +1860,7 @@ function buildToolEventContent(
   return (
     `<tool_event>\n` +
     `<name>${toolName}</name>\n` +
-    `<input>\n${stringifyTranscriptValue(toolInput)}\n</input>\n` +
+    `<input>\n${stringifyUnknown(toolInput)}\n</input>\n` +
     `<response>\n${extractToolResultText(toolResponse)}\n</response>\n` +
     `</tool_event>`
   );

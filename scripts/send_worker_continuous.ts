@@ -19,6 +19,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getWorkerSdkToolsCapabilityLine } from './framework/utils/sdk-tools-mode.js';
+import { isProcessRunning } from './framework/utils/process.js';
 import {
   createFileLogger,
   runAgentLoop,
@@ -165,16 +166,6 @@ function formatTranscriptForAgent(entries: TranscriptEntry[]): string {
 
 function getPidFilePath(sessionId: string, cwd: string): string {
   return getContinuousWorkerPidFile(sessionId, cwd);
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    return err.code === 'EPERM';
-  }
 }
 
 function readPidFile(pidFile: string): number | null {

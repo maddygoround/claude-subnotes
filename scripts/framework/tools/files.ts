@@ -8,17 +8,13 @@ import {
   type ToolExecutionResult,
   type ToolHandler,
 } from './types.js';
+import { truncateText } from '../utils/text.js';
 
 const MAX_READ_LINES = 400;
 const MAX_OUTPUT_CHARS = 12000;
 const MAX_MATCHES = 200;
 const IGNORED_DIRS = new Set(['.git', 'node_modules', '.subnotes']);
 let rgAvailableCache: boolean | null = null;
-
-function truncate(text: string, maxChars: number = MAX_OUTPUT_CHARS): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n...[truncated]`;
-}
 
 function hasRipgrep(): boolean {
   if (rgAvailableCache !== null) {
@@ -58,7 +54,10 @@ function readFileWithWindow(
   const safeLimit = Math.max(1, limit);
   const window = lines.slice(safeOffset, safeOffset + safeLimit);
   const numbered = window.map((line, idx) => `${safeOffset + idx + 1}: ${line}`);
-  return truncate(numbered.join('\n'));
+  return truncateText(numbered.join('\n'), {
+    maxChars: MAX_OUTPUT_CHARS,
+    suffix: '\n...[truncated]',
+  });
 }
 
 function globToRegex(pattern: string): RegExp {
@@ -209,7 +208,10 @@ function executeGrep(input: Record<string, unknown>, ctx: ToolExecutionContext):
     const matchCount = output ? output.split('\n').filter(Boolean).length : 0;
     return createToolResult({
       result: output
-        ? `<grep_result>\n${truncate(output)}\n</grep_result>`
+        ? `<grep_result>\n${truncateText(output, {
+            maxChars: MAX_OUTPUT_CHARS,
+            suffix: '\n...[truncated]',
+          })}\n</grep_result>`
         : '<grep_result>No matches found.</grep_result>',
       summary: output
         ? `Found ${matchCount} matches for ${pattern}`
@@ -261,7 +263,10 @@ function executeGrep(input: Record<string, unknown>, ctx: ToolExecutionContext):
   return createToolResult({
     result:
       matches.length > 0
-        ? `<grep_result>\n${truncate(matches.join('\n'))}\n</grep_result>`
+        ? `<grep_result>\n${truncateText(matches.join('\n'), {
+            maxChars: MAX_OUTPUT_CHARS,
+            suffix: '\n...[truncated]',
+          })}\n</grep_result>`
         : '<grep_result>No matches found.</grep_result>',
     summary:
       matches.length > 0

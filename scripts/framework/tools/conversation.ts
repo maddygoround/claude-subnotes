@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getDurableStateDir } from '../../conversation_utils.js';
+import { truncateText } from '../utils/text.js';
 import {
   boundarySignal,
   clarificationSignal,
@@ -64,11 +65,6 @@ function scoreContent(content: string, query: string): number {
     idx = lower.indexOf(target, idx + target.length);
   }
   return score;
-}
-
-function truncate(text: string, maxChars: number = 320): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}...`;
 }
 
 function executeConversationSearch(
@@ -205,7 +201,7 @@ function executeConversationSearch(
     .map((hit, idx) => {
       return (
         `${idx + 1}. [${hit.timestamp}] session=${hit.sessionId} role=${hit.role} score=${hit.score}\n` +
-        `${truncate(hit.content)}`
+        `${truncateText(hit.content, { maxChars: 320 })}`
       );
     })
     .join('\n\n');

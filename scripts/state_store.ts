@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { isProcessRunning } from './framework/utils/process.js';
 
 export type StoreLogFn = (message: string) => void;
 
@@ -31,16 +32,6 @@ function cloneJsonValue<T>(value: T): T {
 
 function sleepMs(ms: number): void {
   Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    return err.code === 'EPERM';
-  }
 }
 
 function safeUnlink(filePath: string, log?: StoreLogFn): boolean {

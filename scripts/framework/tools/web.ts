@@ -6,16 +6,12 @@ import {
   type ToolHandler,
 } from './types.js';
 import { loadConfig } from '../../conversation_utils.js';
+import { truncateText } from '../utils/text.js';
 
 interface WebSearchItem {
   title: string;
   url: string;
   snippet: string;
-}
-
-function truncate(text: string, maxChars: number = 400): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}...`;
 }
 
 async function fetchWithTimeout(
@@ -82,7 +78,9 @@ async function searchViaExa(input: Record<string, unknown>, cwd: string): Promis
     .map((r) => ({
       title: String(r.title || r.url || 'Untitled'),
       url: String(r.url || ''),
-      snippet: truncate(String(r.text || '').replace(/\s+/g, ' ').trim()),
+      snippet: truncateText(String(r.text || '').replace(/\s+/g, ' ').trim(), {
+        maxChars: 400,
+      }),
     }))
     .filter((r) => r.url);
 }
@@ -130,7 +128,7 @@ async function searchViaDuckDuckGo(
     items.push({
       title: json.Heading || 'DuckDuckGo Result',
       url: json.AbstractURL,
-      snippet: truncate(String(json.AbstractText || '')),
+      snippet: truncateText(String(json.AbstractText || ''), { maxChars: 400 }),
     });
   }
 
@@ -143,7 +141,7 @@ async function searchViaDuckDuckGo(
     items.push({
       title: String(topic.Text || topic.FirstURL),
       url: topic.FirstURL,
-      snippet: truncate(String(topic.Text || '')),
+      snippet: truncateText(String(topic.Text || ''), { maxChars: 400 }),
     });
     if (items.length >= limit) break;
   }
@@ -258,7 +256,7 @@ function stripHtml(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 
-  text = truncate(text, 12000);
+  text = truncateText(text, { maxChars: 12000 });
   if (title) {
     return `Title: ${title}\n\n${text}`;
   }
@@ -303,7 +301,7 @@ async function executeFetchWebpage(input: Record<string, unknown>): Promise<Tool
   const rendered =
     contentType.includes('text/html') || body.includes('<html')
       ? stripHtml(body)
-      : truncate(body, 12000);
+      : truncateText(body, { maxChars: 12000 });
 
   return createToolResult({
     result:

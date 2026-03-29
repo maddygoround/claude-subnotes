@@ -11,6 +11,7 @@
  */
 
 import { readHookInput } from './framework/index.js';
+import { stringifyUnknown } from './framework/utils/serialization.js';
 import {
   appendTranscriptEntry,
   TranscriptEntry,
@@ -45,17 +46,6 @@ function buildSentinelEventContent(warningTypes: string[]): string {
     .join('\n');
 
   return `<sentinel_event>\n${warnings}\n</sentinel_event>`;
-}
-
-function safeStringify(value: unknown): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 async function main(): Promise<void> {
@@ -96,10 +86,10 @@ async function main(): Promise<void> {
         role = 'system';
         const toolName = hookInput.tool_name || 'unknown_tool';
         const toolInput = hookInput.tool_input !== undefined
-          ? safeStringify(hookInput.tool_input)
+          ? stringifyUnknown(hookInput.tool_input)
           : '(no tool input)';
         const toolResponse = hookInput.tool_response !== undefined
-          ? safeStringify(hookInput.tool_response)
+          ? stringifyUnknown(hookInput.tool_response)
           : '(no tool response)';
         content =
           `<tool_event>\n` +
