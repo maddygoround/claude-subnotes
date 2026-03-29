@@ -72,33 +72,33 @@ async function main(): Promise<void> {
       );
     }
 
-    let unreadPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
-    if (unreadPreview.length === 0 && hookInput.transcript_path) {
+    let foregroundPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
+    if (foregroundPreview.length === 0 && hookInput.transcript_path) {
       for (let attempt = 0; attempt < 4; attempt++) {
         await sleep(300);
-        unreadPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
-        if (unreadPreview.length > 0) {
+        foregroundPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
+        if (foregroundPreview.length > 0) {
           break;
         }
       }
     }
 
-    if (unreadPreview.length === 0) {
-      debug('No unread messages, allowing stop');
+    if (foregroundPreview.length === 0) {
+      debug('No foreground messages, allowing stop');
       process.exit(0);
     }
 
-    const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
-    if (unreadMessages.length === 0) {
-      debug('Unread preview was stale, allowing stop');
+    const foregroundMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
+    if (foregroundMessages.length === 0) {
+      debug('Foreground preview was stale, allowing stop');
       process.exit(0);
     }
 
-    debug(`Found ${unreadMessages.length} unread message(s), blocking stop`);
+    debug(`Found ${foregroundMessages.length} foreground message(s), blocking stop`);
 
-    const formattedMessages = formatMessagesForHookContext(unreadMessages);
+    const formattedMessages = formatMessagesForHookContext(foregroundMessages);
 
-    const reason = `${formattedMessages}\n\n${generateForegroundInstruction(unreadMessages)}`;
+    const reason = `${formattedMessages}\n\n${generateForegroundInstruction(foregroundMessages)}`;
 
     console.log(
       JSON.stringify({

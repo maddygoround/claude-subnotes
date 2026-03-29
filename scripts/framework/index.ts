@@ -24,12 +24,20 @@ export {
 
 export {
   appendAgentMessage,
+  evaluateForegroundCandidate,
   fetchUnreadAgentMessages,
+  loadAgentMessageHistory,
   peekUnreadAgentMessages,
   formatMessagesForStdout,
   formatMessagesForHookContext,
   generateForegroundInstruction,
+  BASE_SURFACE_THRESHOLD,
+  scoreOutcomeMomentum,
   type AgentMessage,
+  type ForegroundCandidate,
+  type ForegroundDecision,
+  type ForegroundEvaluationContext,
+  type ForegroundTranscriptEntry,
   type AgentMessageType,
 } from './agent-messages.js';
 

@@ -22,6 +22,13 @@ import {
   createFileLogger,
   runAgentLoop,
   appendAgentMessage,
+  evaluateForegroundCandidate,
+  loadAgentMessageHistory,
+  BASE_SURFACE_THRESHOLD,
+  scoreOutcomeMomentum,
+  type AgentMessageType,
+  type ForegroundCandidate,
+  type ForegroundDecision,
 } from './framework/index.js';
 import { withProcessLock } from './state_store.js';
 import {
@@ -58,6 +65,7 @@ import {
 import type {
   ObservationEntry,
   SentinelWarningType,
+  InterventionRecord,
 } from './autonomic/types.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
@@ -239,6 +247,14 @@ interface ContinuationResult {
   continuationReason: string | null;
 }
 
+interface ParsedForegroundDecision {
+  show: boolean;
+  type: AgentMessageType | 'none';
+  score: number;
+  whyNow: string;
+  content: string;
+}
+
 function extractContinuationThought(response: string): ContinuationResult {
   const match = response.match(/<continue_thought>([\s\S]*?)<\/continue_thought>/);
   if (!match) {
@@ -247,6 +263,149 @@ function extractContinuationThought(response: string): ContinuationResult {
   const continuationReason = match[1].trim();
   const text = response.replace(/<continue_thought>[\s\S]*?<\/continue_thought>/g, '').trim();
   return { text, continuationReason };
+}
+
+function extractXmlTag(block: string, tag: string): string {
+  const pattern = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i');
+  const match = block.match(pattern);
+  return match?.[1]?.trim() || '';
+}
+
+function parseForegroundDecision(response: string): ParsedForegroundDecision | null {
+  const match = response.match(
+    /<foreground_decision>([\s\S]*?)<\/foreground_decision>/i,
+  );
+  if (!match) {
+    return null;
+  }
+
+  const block = match[1];
+  const showRaw = extractXmlTag(block, 'show').toLowerCase();
+  const typeRaw = extractXmlTag(block, 'type').toLowerCase();
+  const scoreRaw = extractXmlTag(block, 'score');
+  const whyNow = extractXmlTag(block, 'why_now');
+  const content = extractXmlTag(block, 'content');
+  const parsedScore = parseInt(scoreRaw, 10);
+  const type: AgentMessageType | 'none' =
+    typeRaw === 'reflect' || typeRaw === 'steer' || typeRaw === 'insight'
+      ? typeRaw
+      : 'none';
+  const show = showRaw === 'yes' || showRaw === 'true';
+  const score = Number.isFinite(parsedScore)
+    ? Math.max(0, Math.min(100, parsedScore))
+    : type === 'insight'
+      ? 84
+      : type === 'steer'
+        ? 72
+        : type === 'reflect'
+          ? 62
+          : 18;
+
+  return {
+    show,
+    type,
+    score,
+    whyNow,
+    content,
+  };
+}
+
+function extractLegacyThoughtCandidates(response: string): ForegroundCandidate[] {
+  const typeRegex = /<(reflect|steer|insight)>([\s\S]*?)<\/\1>/g;
+  let match: RegExpExecArray | null;
+  const candidates: ForegroundCandidate[] = [];
+
+  while ((match = typeRegex.exec(response)) !== null) {
+    const candidate: ForegroundCandidate = {
+      type: match[1] as AgentMessageType,
+      text: match[2].trim(),
+    };
+    if (!candidate.text) {
+      continue;
+    }
+    candidates.push(candidate);
+  }
+
+  return candidates;
+}
+
+function summarizeRecentForegroundHistory(cwd: string): string {
+  const history = loadAgentMessageHistory(cwd, log)
+    .filter((message) => Boolean(message.read))
+    .slice(-5);
+
+  if (history.length === 0) {
+    return `<recent_foreground_history>\nNone recently surfaced.\n</recent_foreground_history>`;
+  }
+
+  const items = history
+    .map((message, index) => {
+      const excerpt = message.text.replace(/\s+/g, ' ').slice(0, 180).trim();
+      const score =
+        typeof message.foreground_score === 'number'
+          ? ` score="${message.foreground_score}"`
+          : '';
+      return `- [${index + 1}] type="${message.type || 'reflect'}"${score} ${excerpt}`;
+    })
+    .join('\n');
+
+  return `<recent_foreground_history>\n${items}\n</recent_foreground_history>`;
+}
+
+function summarizeRecentInterventions(cwd: string): string {
+  const interventions = loadInterventions(cwd, log).slice(-6);
+  if (interventions.length === 0) {
+    return `<recent_intervention_outcomes>\nNone recorded yet.\n</recent_intervention_outcomes>`;
+  }
+
+  const items = interventions
+    .map((intervention, index) => {
+      const outcome = intervention.outcome || 'unresolved';
+      const excerpt = intervention.intervention_content
+        .replace(/\s+/g, ' ')
+        .slice(0, 160)
+        .trim();
+      return `- [${index + 1}] type="${intervention.type}" outcome="${outcome}" tool="${intervention.tool_name}" ${excerpt}`;
+    })
+    .join('\n');
+
+  return `<recent_intervention_outcomes>\n${items}\n</recent_intervention_outcomes>`;
+}
+
+function buildWorkerForegroundDecision(
+  decision: ParsedForegroundDecision,
+  recentInterventions: InterventionRecord[],
+): ForegroundDecision {
+  const normalizedScore = decision.show
+    ? Math.max(60, decision.score)
+    : decision.score;
+
+  const outcomeSignal = scoreOutcomeMomentum(recentInterventions);
+  const typeBias = decision.type === 'reflect' ? 4 : 0;
+  const threshold = Math.min(
+    70,
+    Math.max(48, BASE_SURFACE_THRESHOLD + outcomeSignal.thresholdAdjustment + typeBias),
+  );
+
+  return {
+    shouldSurface: decision.show && normalizedScore >= threshold,
+    score: normalizedScore,
+    threshold,
+    reasons: decision.whyNow
+      ? [
+          decision.whyNow,
+          'foreground decision authored by subconscious worker',
+        ]
+      : ['foreground decision authored by subconscious worker'],
+    urgency: 0,
+    actionability: 0,
+    relevance: 0,
+    novelty: 0,
+    durability: outcomeSignal.score,
+    momentum: outcomeSignal.score,
+    typeBias,
+    metaPenalty: 0,
+  };
 }
 
 // ============================================
@@ -286,13 +445,22 @@ function buildSystemPrompt(
     `If you have a sub-question or follow-up thought that needs resolution before concluding, emit it as <continue_thought>your question or follow-up here</continue_thought> anywhere in your response — the worker will re-invoke you with that as the next input (max 2 continuations). Omit the tag when your thought is complete.\n` +
     `Tool results may include subconscious signals such as clarification_needed, assumption, risk, and boundary. Use them as internal scaffolding for your reasoning.\n` +
     `Update memory only when it adds durable value.\n` +
+    `Silence is preferred. If you do not have a thought that should materially change Claude Code's next move or preserve important durable state, return an empty response.\n` +
     `</runtime_context>\n\n` +
     `<response_guidelines>\n` +
-    `When you have thoughts or advice for Claude Code, enclose them in one of the following XML tags:\n` +
-    `- <reflect>...</reflect>: Use for general observations, noting patterns, summarizing a successful workflow, or updating memory context. This is the default quiet observation.\n` +
-    `- <steer>...</steer>: Use when Claude is taking a slightly suboptimal path, violating a project convention, or about to make a minor mistake (but isn't completely stuck). Gently nudges Claude onto the right path.\n` +
-    `- <insight>...</insight>: Use ONLY as a high-priority loop breaker when Claude is looping on the same failing error message, entirely misunderstanding the root cause, or pursuing an impossible approach.\n` +
-    `You may emit multiple tags if necessary. Only the contents within these tags will be delivered to Claude.\n` +
+    `After you finish thinking and any tool use, emit exactly one <foreground_decision> block.\n` +
+    `If nothing should surface right now, use:\n` +
+    `<foreground_decision>\n<show>no</show>\n<type>none</type>\n<score>0-40</score>\n<why_now>brief internal reason</why_now>\n</foreground_decision>\n` +
+    `If something should surface right now, use:\n` +
+    `<foreground_decision>\n<show>yes</show>\n<type>reflect|steer|insight</type>\n<score>60-100</score>\n<why_now>brief internal reason tied to the current turn</why_now>\n<content>the exact single thought to surface</content>\n</foreground_decision>\n` +
+    `Decision semantics:\n` +
+    `- type="reflect": a concise durable observation that genuinely matters now.\n` +
+    `- type="steer": Claude is drifting and a near-term correction will improve the next move.\n` +
+    `- type="insight": high-priority loop breaker or root-cause pivot.\n` +
+    `Never emit a surfaced thought merely to say you are watching, staying quiet, or that nothing needs guidance.\n` +
+    `Choose the single highest-leverage thought per cycle. If you notice several things, keep only the one that most changes Claude's next action and use memory tools for the rest.\n` +
+    `The <why_now> field is for internal routing/logging only and will not be shown to Claude.\n` +
+    `Do not emit bare <reflect>, <steer>, or <insight> tags unless you are falling back because the decision format failed.\n` +
     `</response_guidelines>\n\n` +
     `Your current memory blocks:\n\n`;
 
@@ -307,6 +475,49 @@ function buildSystemPrompt(
 // ============================================
 
 // Autonomic interval/threshold defaults are now provided by config.json via loadConfig()
+
+/**
+ * Determine if a tool response represents an actual failure.
+ *
+ * The naive approach (scanning content for "error") produces false positives
+ * whenever Claude reads TypeScript files containing `catch (error)`, error logs,
+ * or any other legitimate use of the word "error" in code or documentation.
+ *
+ * Instead we check for structural indicators of real failure:
+ * - Bash: non-zero exit code explicitly reported
+ * - File tools: tool-level error prefix at the start of response
+ */
+function isToolResponseSuccessful(toolName: string, response: string): boolean {
+  if (!response) return true;
+
+  if (toolName === 'Bash') {
+    // Real Bash failure: "exit code: N" where N is non-zero
+    const exitCodeMatch = response.match(/exit code[:\s]+(\d+)/i);
+    if (exitCodeMatch) {
+      return parseInt(exitCodeMatch[1], 10) === 0;
+    }
+    return true;
+  }
+
+  // For file tools (Read, Glob, Grep, Edit, Write, LS):
+  // Actual failures start with a tool-level error message, not file content.
+  // File content always starts with line numbers (cat -n format) or structured output.
+  const trimmed = response.trimStart();
+  const toolErrorPrefixes = [
+    'Error:',
+    'ENOENT:',
+    'EACCES:',
+    'EPERM:',
+    'Permission denied',
+    'No such file or directory',
+    'Cannot read',
+    'Failed to',
+    'not found',
+  ];
+  return !toolErrorPrefixes.some((prefix) =>
+    trimmed.startsWith(prefix),
+  );
+}
 
 /**
  * Convert transcript entries to observation entries for the autonomic store.
@@ -380,18 +591,9 @@ function transcriptToObservations(
             }).filter(Boolean)
           : [];
 
-        // Check for failure
-        const failurePatterns = [
-          'error',
-          'Error',
-          'FAIL',
-          'failed',
-          'exit code',
-          'ENOENT',
-        ];
-        const success = !failurePatterns.some((p) =>
-          toolResponse.includes(p),
-        );
+        // Check for actual tool failure — not content containing the word "error"
+        // (TypeScript files with `catch (error)` would otherwise be marked failed)
+        const success = isToolResponseSuccessful(toolName, toolResponse);
 
         const observation: ObservationEntry = {
           timestamp: entry.timestamp,
@@ -597,11 +799,17 @@ async function continuousLoop(payload: ContinuousPayload): Promise<void> {
         let baseMemoryBlocks = memoryBlocks.map((block) => ({ ...block }));
 
         const transcriptText = formatTranscriptForAgent(newEntries);
+        const recentForegroundHistory = summarizeRecentForegroundHistory(payload.cwd);
+        const recentInterventionOutcomes = summarizeRecentInterventions(payload.cwd);
         const maxContinuations = config.maxContinuations;
 
         let currentUserMessage = `${transcriptText}
 
-Process these new messages. Update memory blocks if you observe patterns, preferences, or important context. Write to guidance only if you have something useful to surface.`;
+${recentForegroundHistory}
+
+${recentInterventionOutcomes}
+
+Process these new messages. Update memory blocks if you observe patterns, preferences, or important context. Then decide for yourself whether anything should surface into Claude's foreground right now.`;
         let finalResponse = '';
 
         for (let continuation = 0; continuation <= maxContinuations; continuation++) {
@@ -643,24 +851,94 @@ Process these new messages. Update memory blocks if you observe patterns, prefer
         }
 
         if (finalResponse.trim()) {
-          const typeRegex = /<(reflect|steer|insight)>([\s\S]*?)<\/\1>/g;
-          let match;
-          let foundAny = false;
-          
-          while ((match = typeRegex.exec(finalResponse)) !== null) {
-            foundAny = true;
-            const msgType = match[1] as 'reflect' | 'steer' | 'insight';
-            const msgContent = match[2].trim();
-            if (msgContent) {
-              appendAgentMessage(payload.cwd, msgContent, log, msgType);
-              log(`✓ Appended agent message of type <${msgType}>`);
+          const structuredDecision = parseForegroundDecision(finalResponse);
+          if (structuredDecision) {
+            log(
+              `Foreground decision from worker: show=${structuredDecision.show} ` +
+              `type=${structuredDecision.type} score=${structuredDecision.score}` +
+              (structuredDecision.whyNow
+                ? ` — ${structuredDecision.whyNow}`
+                : ''),
+            );
+
+            const workerRecentInterventions = loadInterventions(payload.cwd, log).slice(-12);
+            const workerDecision = buildWorkerForegroundDecision(structuredDecision, workerRecentInterventions);
+            if (
+              workerDecision.shouldSurface &&
+              structuredDecision.type !== 'none' &&
+              structuredDecision.content
+            ) {
+              appendAgentMessage(
+                payload.cwd,
+                structuredDecision.content,
+                log,
+                structuredDecision.type,
+                workerDecision,
+              );
+              log(
+                `✓ Appended worker-directed foreground thought of type <${structuredDecision.type}>`,
+              );
+            } else {
+              log('Worker kept this cycle internal; nothing entered Claude foreground');
             }
-          }
-          
-          // Fallback if the agent ignores the prompt instructions and just dumps plain text
-          if (!foundAny && finalResponse.trim()) {
-            appendAgentMessage(payload.cwd, finalResponse.trim(), log, 'reflect');
-            log('✓ Appended fallback agent message (no tags found)');
+          } else {
+            const thoughtCandidates = extractLegacyThoughtCandidates(finalResponse);
+            if (thoughtCandidates.length > 0) {
+              const recentInterventions = loadInterventions(payload.cwd, log).slice(-12);
+              const history = loadAgentMessageHistory(payload.cwd, log);
+              const evaluatedCandidates = thoughtCandidates
+                .map((candidate) => ({
+                  candidate,
+                  decision: evaluateForegroundCandidate(
+                    payload.cwd,
+                    candidate,
+                    {
+                      recentTranscriptEntries: newEntries,
+                      recentInterventions,
+                      history,
+                    },
+                    log,
+                  ),
+                }))
+                .sort((a, b) => b.decision.score - a.decision.score);
+              const selectedThought = evaluatedCandidates.find(
+                ({ decision }) => decision.shouldSurface,
+              );
+
+              for (const { candidate, decision } of evaluatedCandidates) {
+                log(
+                  `Legacy thought <${candidate.type}> scored ${decision.score}/${decision.threshold} ` +
+                  `[urgency=${decision.urgency}, actionability=${decision.actionability}, ` +
+                  `relevance=${decision.relevance}, novelty=${decision.novelty}, ` +
+                  `durability=${decision.durability}, momentum=${decision.momentum}, ` +
+                  `meta=${decision.metaPenalty}]` +
+                  (decision.reasons.length > 0
+                    ? ` — ${decision.reasons.join('; ')}`
+                    : ''),
+                );
+              }
+
+              if (selectedThought) {
+                appendAgentMessage(
+                  payload.cwd,
+                  selectedThought.candidate.text,
+                  log,
+                  selectedThought.candidate.type,
+                  selectedThought.decision,
+                );
+                log(
+                  `✓ Appended legacy fallback foreground thought of type <${selectedThought.candidate.type}>`,
+                );
+              } else {
+                log(
+                  'Legacy fallback scorer kept all candidate thoughts internal for this cycle',
+                );
+              }
+            } else {
+              log(
+                'No foreground decision or legacy thought candidates found; keeping the worker silent',
+              );
+            }
           }
         }
 
