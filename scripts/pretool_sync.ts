@@ -169,10 +169,10 @@ async function main(): Promise<void> {
 
     const blocks = loadLocalMemory(hookInput.cwd, debug);
     const changedBlocks = detectChangedBlocks(blocks, state.lastBlockValues);
-    const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
+    const foregroundMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
 
     debug(`Changed blocks: ${changedBlocks.length}`);
-    debug(`Unread messages: ${unreadMessages.length}`);
+    debug(`Foreground messages: ${foregroundMessages.length}`);
 
     // Build the existing memory/message context sections
     const updateSections: string[] = [];
@@ -186,10 +186,10 @@ async function main(): Promise<void> {
       updateSections.push(memoryUpdate);
     }
 
-    if (unreadMessages.length > 0) {
+    if (foregroundMessages.length > 0) {
       const whisperUpdate =
         `<subnotes_message_update>\n` +
-        `${formatMessagesForHookContext(unreadMessages)}\n` +
+        `${formatMessagesForHookContext(foregroundMessages)}\n` +
         `</subnotes_message_update>`;
       updateSections.push(whisperUpdate);
     }
@@ -331,7 +331,7 @@ async function main(): Promise<void> {
 
     // Whisper / insight / pass — build context with memory changes + sentinel + reflex advisories
     const hasMemoryUpdates =
-      changedBlocks.length > 0 || unreadMessages.length > 0;
+      changedBlocks.length > 0 || foregroundMessages.length > 0;
     const hasInsight = autonomicAction.type === 'insight';
     const hasWhisper = autonomicAction.type === 'whisper';
     const hasSentinel = sentinelContext.length > 0;
@@ -371,8 +371,8 @@ async function main(): Promise<void> {
     }
 
     // Instructions for Claude
-    if (unreadMessages.length > 0) {
-      contextParts.push(generateForegroundInstruction(unreadMessages));
+    if (foregroundMessages.length > 0) {
+      contextParts.push(generateForegroundInstruction(foregroundMessages));
     }
 
     if (changedBlocks.length > 0) {

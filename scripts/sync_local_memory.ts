@@ -55,7 +55,7 @@ async function main(): Promise<void> {
     const lastBlockValues = state?.lastBlockValues || null;
 
     const memoryBlocks = loadLocalMemory(cwd);
-    const unreadMessages = fetchUnreadAgentMessages(cwd, debug);
+    const foregroundMessages = fetchUnreadAgentMessages(cwd, debug);
 
     const changedBlocks = detectChangedBlocks(memoryBlocks, lastBlockValues);
 
@@ -84,9 +84,9 @@ async function main(): Promise<void> {
       }
     }
 
-    if (unreadMessages.length > 0) {
-      outputs.push(formatMessagesForHookContext(unreadMessages));
-      outputs.push(generateForegroundInstruction(unreadMessages));
+    if (foregroundMessages.length > 0) {
+      outputs.push(formatMessagesForHookContext(foregroundMessages));
+      outputs.push(generateForegroundInstruction(foregroundMessages));
     }
 
     if (lastBlockValues && changedBlocks.length > 0) {
