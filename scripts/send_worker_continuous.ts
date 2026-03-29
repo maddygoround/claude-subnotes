@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getWorkerSdkToolsCapabilityLine } from './framework/utils/sdk-tools-mode.js';
 import { isProcessRunning } from './framework/utils/process.js';
+import { readPidFromFile } from './framework/utils/pid.js';
 import {
   createFileLogger,
   runAgentLoop,
@@ -168,21 +169,12 @@ function getPidFilePath(sessionId: string, cwd: string): string {
   return getContinuousWorkerPidFile(sessionId, cwd);
 }
 
-function readPidFile(pidFile: string): number | null {
-  try {
-    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-    return Number.isNaN(pid) || pid <= 0 ? null : pid;
-  } catch {
-    return null;
-  }
-}
-
 function claimPidFile(sessionId: string, cwd: string): boolean {
   const pidFile = getPidFilePath(sessionId, cwd);
   return withProcessLock(
     `${pidFile}.claim.lock`,
     () => {
-      const existingPid = readPidFile(pidFile);
+      const existingPid = readPidFromFile(pidFile);
       if (existingPid !== null && isProcessRunning(existingPid)) {
         log(
           `Another continuous worker already owns ${pidFile} (PID: ${existingPid}), exiting duplicate worker`,
@@ -220,7 +212,7 @@ function cleanupPidFile(sessionId: string, cwd: string): void {
     return;
   }
 
-  const currentPid = readPidFile(pidFile);
+  const currentPid = readPidFromFile(pidFile);
   if (currentPid === null) {
     fs.unlinkSync(pidFile);
     log(`Removed unreadable PID file during cleanup: ${pidFile}`);

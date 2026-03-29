@@ -10,8 +10,14 @@ This folder contains reusable helpers used by multiple components.
   - Mode parsing and capability-line formatting.
 - `file-paths.ts`
   - Tool-input file path extraction helpers.
+- `conversation-state.ts`
+  - Sync/memory state helpers (`parseSyncStateData`, cloning, merge helpers).
 - `process.ts`
   - Process lifecycle helper (`isProcessRunning`).
+- `pid.ts`
+  - PID file parser (`readPidFromFile`).
+- `transcript-parser.ts`
+  - Claude transcript parsing helper (`parseClaudeTranscriptEntries`).
 - `serialization.ts`
   - Safe value-to-string serializer (`stringifyUnknown`).
 - `text.ts`
@@ -23,8 +29,16 @@ This folder contains reusable helpers used by multiple components.
   - `scripts/state_store.ts`
   - `scripts/conversation_utils.ts`
   - `scripts/send_worker_continuous.ts`
+- `conversation-state.ts`
+  - `scripts/conversation_utils.ts`
 - `serialization.ts`
-  - `scripts/stream_transcript.ts`
+  - `scripts/application/use-cases/stream-transcript.use-case.ts`
+  - `scripts/conversation_utils.ts`
+- `pid.ts`
+  - `scripts/conversation_utils.ts`
+  - `scripts/send_worker_continuous.ts`
+  - `scripts/application/use-cases/stop-continuous-worker.use-case.ts`
+- `transcript-parser.ts`
   - `scripts/conversation_utils.ts`
 - `text.ts`
   - `scripts/framework/tools/files.ts`
