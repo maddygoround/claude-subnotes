@@ -19,25 +19,33 @@ import {
   readHookInput,
   createDebugLogger,
   fetchUnreadAgentMessages,
+  peekUnreadAgentMessages,
   formatMessagesForHookContext,
   generateForegroundInstruction,
 } from './framework/index.js';
-import { getMode } from './conversation_utils.js';
+import {
+  getMode,
+  getSdkToolsMode,
+  ensureContinuousWorker,
+  mirrorClaudeTranscript,
+} from './conversation_utils.js';
 
 const debug = createDebugLogger('stop-sync');
 
 interface StopHookInput {
   session_id: string;
   cwd: string;
+  transcript_path?: string;
   hook_event_name?: string;
 }
 
-async function main(): Promise<void> {
-  const mode = getMode();
-  if (mode === 'off') {
-    process.exit(0);
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
+async function main(): Promise<void> {
   try {
     const hookInput = await readHookInput<StopHookInput>();
 
@@ -46,10 +54,43 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
+    const mode = getMode(hookInput.cwd);
+    if (mode === 'off') {
+      process.exit(0);
+    }
 
-    if (unreadMessages.length === 0) {
+    if (hookInput.session_id && hookInput.transcript_path) {
+      ensureContinuousWorker(
+        hookInput.session_id,
+        hookInput.cwd,
+        getSdkToolsMode(hookInput.cwd),
+      );
+      mirrorClaudeTranscript(
+        hookInput.cwd,
+        hookInput.session_id,
+        hookInput.transcript_path,
+      );
+    }
+
+    let unreadPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
+    if (unreadPreview.length === 0 && hookInput.transcript_path) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await sleep(300);
+        unreadPreview = peekUnreadAgentMessages(hookInput.cwd, debug);
+        if (unreadPreview.length > 0) {
+          break;
+        }
+      }
+    }
+
+    if (unreadPreview.length === 0) {
       debug('No unread messages, allowing stop');
+      process.exit(0);
+    }
+
+    const unreadMessages = fetchUnreadAgentMessages(hookInput.cwd, debug);
+    if (unreadMessages.length === 0) {
+      debug('Unread preview was stale, allowing stop');
       process.exit(0);
     }
 

@@ -451,6 +451,25 @@ export function recordSentinelWarnings(
 }
 
 /**
+ * Queue emitted warnings so the following PostToolUse observation can retain
+ * the real-time sentinel context in the historical log.
+ */
+export function queueSentinelWarningsForObservation(
+  state: SentinelState,
+  warnings: SentinelWarning[],
+): SentinelState {
+  const nextWarningTypes = new Set([
+    ...(state.pending_observation_warnings || []),
+    ...warnings.map((warning) => warning.type),
+  ]);
+
+  return {
+    ...state,
+    pending_observation_warnings: Array.from(nextWarningTypes),
+  };
+}
+
+/**
  * Format sentinel warnings as XML for hook context injection.
  */
 export function formatSentinelWarnings(warnings: SentinelWarning[]): string {

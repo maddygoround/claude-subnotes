@@ -19,6 +19,7 @@ import {
   ensureContinuousWorker,
   isAutonomicEnabled,
   loadConfig,
+  mirrorClaudeTranscript,
 } from './conversation_utils.js';
 import {
   loadSentinelState,
@@ -34,7 +35,16 @@ interface StreamHookInput {
   tool_name?: string;
   tool_input?: unknown;
   tool_response?: unknown;
+  transcript_path?: string;
   hook_event_name?: string;
+}
+
+function buildSentinelEventContent(warningTypes: string[]): string {
+  const warnings = warningTypes
+    .map((warningType) => `<warning>${warningType}</warning>`)
+    .join('\n');
+
+  return `<sentinel_event>\n${warnings}\n</sentinel_event>`;
 }
 
 function safeStringify(value: unknown): string {
@@ -49,11 +59,6 @@ function safeStringify(value: unknown): string {
 }
 
 async function main(): Promise<void> {
-  const mode = getMode();
-  if (mode === 'off') {
-    process.exit(0);
-  }
-
   const hookInput = await readHookInput<StreamHookInput>();
 
   try {
@@ -61,53 +66,66 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
+    const mode = getMode(hookInput.cwd);
+    if (mode === 'off') {
+      process.exit(0);
+    }
+
     // Auto-heal: keep a worker running for this session even if it exited unexpectedly.
     ensureContinuousWorker(
       hookInput.session_id,
       hookInput.cwd,
-      getSdkToolsMode(),
+      getSdkToolsMode(hookInput.cwd),
     );
 
     const eventName = hookInput.hook_event_name || 'Unknown';
-    let role: 'user' | 'assistant' | 'system' = 'user';
-    let content = '';
-
-    if (eventName === 'UserPromptSubmit' && hookInput.prompt) {
-      role = 'user';
-      content = hookInput.prompt;
-    } else if (eventName === 'PostToolUse') {
-      role = 'system';
-      const toolName = hookInput.tool_name || 'unknown_tool';
-      const toolInput = hookInput.tool_input !== undefined
-        ? safeStringify(hookInput.tool_input)
-        : '(no tool input)';
-      const toolResponse = hookInput.tool_response !== undefined
-        ? safeStringify(hookInput.tool_response)
-        : '(no tool response)';
-      content =
-        `<tool_event>\n` +
-        `<name>${toolName}</name>\n` +
-        `<input>\n${toolInput}\n</input>\n` +
-        `<response>\n${toolResponse}\n</response>\n` +
-        `</tool_event>`;
-    } else if (hookInput.response) {
-      role = 'assistant';
-      content = hookInput.response;
-    } else if (hookInput.prompt) {
-      role = 'user';
-      content = hookInput.prompt;
+    if (hookInput.transcript_path) {
+      mirrorClaudeTranscript(
+        hookInput.cwd,
+        hookInput.session_id,
+        hookInput.transcript_path,
+      );
     } else {
-      // No content to stream
-      process.exit(0);
+      let role: 'user' | 'assistant' | 'system' = 'user';
+      let content = '';
+
+      if (eventName === 'UserPromptSubmit' && hookInput.prompt) {
+        role = 'user';
+        content = hookInput.prompt;
+      } else if (eventName === 'PostToolUse') {
+        role = 'system';
+        const toolName = hookInput.tool_name || 'unknown_tool';
+        const toolInput = hookInput.tool_input !== undefined
+          ? safeStringify(hookInput.tool_input)
+          : '(no tool input)';
+        const toolResponse = hookInput.tool_response !== undefined
+          ? safeStringify(hookInput.tool_response)
+          : '(no tool response)';
+        content =
+          `<tool_event>\n` +
+          `<name>${toolName}</name>\n` +
+          `<input>\n${toolInput}\n</input>\n` +
+          `<response>\n${toolResponse}\n</response>\n` +
+          `</tool_event>`;
+      } else if (hookInput.response) {
+        role = 'assistant';
+        content = hookInput.response;
+      } else if (hookInput.prompt) {
+        role = 'user';
+        content = hookInput.prompt;
+      } else {
+        // No content to stream
+        process.exit(0);
+      }
+
+      const entry: TranscriptEntry = {
+        timestamp: new Date().toISOString(),
+        role,
+        content,
+      };
+
+      appendTranscriptEntry(hookInput.cwd, hookInput.session_id, entry);
     }
-
-    const entry: TranscriptEntry = {
-      timestamp: new Date().toISOString(),
-      role,
-      content,
-    };
-
-    appendTranscriptEntry(hookInput.cwd, hookInput.session_id, entry);
 
     // Update Sentinel state on PostToolUse events (System 5)
     if (
@@ -118,6 +136,9 @@ async function main(): Promise<void> {
       try {
         const config = loadConfig(hookInput.cwd);
         const sentinelState = loadSentinelState(hookInput.session_id);
+        const pendingObservationWarnings = [
+          ...(sentinelState.pending_observation_warnings || []),
+        ];
         const updatedState = updateSentinelState(
           sentinelState,
           hookInput.tool_name,
@@ -125,7 +146,16 @@ async function main(): Promise<void> {
           hookInput.tool_response,
           config,
         );
+        updatedState.pending_observation_warnings = [];
         saveSentinelState(hookInput.session_id, updatedState);
+
+        if (pendingObservationWarnings.length > 0) {
+          appendTranscriptEntry(hookInput.cwd, hookInput.session_id, {
+            timestamp: new Date().toISOString(),
+            role: 'system',
+            content: buildSentinelEventContent(pendingObservationWarnings),
+          });
+        }
       } catch {
         // Sentinel updates are best-effort — never break the hook
       }

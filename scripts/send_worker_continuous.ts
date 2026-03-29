@@ -55,7 +55,10 @@ import {
   pruneInterventions,
   tune,
 } from './autonomic/index.js';
-import type { ObservationEntry } from './autonomic/types.js';
+import type {
+  ObservationEntry,
+  SentinelWarningType,
+} from './autonomic/types.js';
 
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'send_worker_continuous.log');
@@ -313,11 +316,44 @@ function transcriptToObservations(
   sessionId: string,
 ): ObservationEntry[] {
   const observations: ObservationEntry[] = [];
-  let lastWasUserPrompt = false;
+  const validSentinelWarnings = new Set<SentinelWarningType>([
+    'thrashing',
+    'test_loop',
+    'error_cascade',
+    'overwrite',
+  ]);
+  let userTurnActive = false;
+  let lastObservation: ObservationEntry | null = null;
 
   for (const entry of entries) {
     if (entry.role === 'user') {
-      lastWasUserPrompt = true;
+      userTurnActive = true;
+      lastObservation = null;
+      continue;
+    }
+
+    if (
+      entry.role === 'system' &&
+      entry.content.includes('<sentinel_event>') &&
+      lastObservation
+    ) {
+      const warningTypes = Array.from(
+        entry.content.matchAll(/<warning>(.*?)<\/warning>/g),
+      )
+        .map((match) => match[1])
+        .filter(
+          (warningType): warningType is SentinelWarningType =>
+            validSentinelWarnings.has(warningType as SentinelWarningType),
+        );
+
+      if (warningTypes.length > 0) {
+        const existingWarnings = new Set(lastObservation.sentinel_warnings || []);
+        for (const warningType of warningTypes) {
+          existingWarnings.add(warningType);
+        }
+        lastObservation.sentinel_warnings = Array.from(existingWarnings);
+      }
+
       continue;
     }
 
@@ -357,7 +393,7 @@ function transcriptToObservations(
           toolResponse.includes(p),
         );
 
-        observations.push({
+        const observation: ObservationEntry = {
           timestamp: entry.timestamp,
           tool_name: toolName,
           files,
@@ -365,13 +401,13 @@ function transcriptToObservations(
           error: success
             ? undefined
             : toolResponse.slice(0, 200),
-          follows_user_prompt: lastWasUserPrompt,
+          follows_user_prompt: userTurnActive,
           session_id: sessionId,
-        });
+        };
+        observations.push(observation);
+        lastObservation = observation;
       }
     }
-
-    lastWasUserPrompt = false;
   }
 
   return observations;
