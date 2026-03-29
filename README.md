@@ -6,12 +6,12 @@ A persistent memory agent for Claude Code. A local Claude agent that watches you
 
 ## What Is This?
 
-Claude Code forgets everything between sessions. SubNotes is a local background agent running underneath — watching, learning, and whispering back:
+Claude Code forgets everything between sessions. Reflect is a local background agent running underneath — watching, learning, and whispering back:
 
 - **Watches** every Claude Code session transcript
 - **Reads your codebase** — explores files with Read, Grep, and Glob while processing transcripts
 - **Remembers** across sessions, projects, and time
-- **Whispers guidance** — surfaces context, patterns, and reminders before each prompt
+- **Whispers guidance** — surfaces context, patterns, and historical narrative insights before each prompt
 - **Never blocks** — runs asynchronously in the background
 - **Fully local** — powered by Anthropic's SDK, no external service required
 
@@ -19,7 +19,7 @@ Not just a memory layer — a background agent with real tool access that gets s
 
 ## How It Works
 
-After each response, the transcript is sent to a local Claude agent via the Anthropic SDK. The agent reads files, updates its memory blocks, and can whisper back before the next prompt. All memory is stored locally in `.subnotes/` directory.
+After each response, the transcript is sent to a local Claude agent via the Anthropic SDK. The agent reads files, updates its memory blocks, and can whisper back before the next prompt. The autonomic "Crystallizer" (System 1) also generates rich, historical narrative insights based on your behavior. All memory is stored locally in `.subnotes/` directory.
 
 ```
 ┌─────────────┐          ┌─────────────────────────────┐
@@ -34,7 +34,7 @@ After each response, the transcript is sent to a local Claude agent via the Anth
        ├───────────────────────►│ New session notification
        │                        │
        │   Before each prompt   │
-       │◄───────────────────────┤ Whispers guidance → stdout
+       │◄───────────────────────┤ Whispers guidance & Insights → stdout
        │                        │
        │   Before each tool use │
        │◄───────────────────────┤ Mid-workflow updates → stdout
@@ -42,7 +42,7 @@ After each response, the transcript is sent to a local Claude agent via the Anth
        │   After each response  │
        ├───────────────────────►│ Transcript → Agent (async)
        │                        │  ↳ Reads files, updates memory
-       │                        │  ↳ May self-continue up to 2x
+       │                        │  ↳ Tracks behaviors (Subconscious)
        │   Before stop          │
        │◄───────────────────────┤ Blocks stop if unread messages
        │                        │  ↳ Injects message, then stops
@@ -99,17 +99,17 @@ Get your API key from [console.anthropic.com](https://console.anthropic.com).
 
 ```bash
 export SUBNOTES_MODE="whisper"           # Default. Or "full" for blocks + messages, "off" to disable
-export SUBNOTES_HOME="$HOME"             # Consolidate .subnotes state to ~/.subnotes/
+export SUBNOTES_HOME="$HOME"             # Consolidate state to ~/.subnotes/
 export SUBNOTES_SDK_TOOLS="read-only"    # Or "full", "off"
 export SUBNOTES_DEBUG="1"                # Enable debug logging
 export SUBNOTES_IDLE_TIMEOUT="1800000"   # Optional: worker idle self-shutdown in ms (0 disables)
-export SUBNOTES_MAX_CONTINUATIONS="2"        # Max self-continuations per cycle (default: 2)
+export SUBNOTES_MAX_CONTINUATIONS="2"    # Max self-continuations per cycle (default: 2)
 export ANTHROPIC_MODEL="claude-sonnet-4-6"  # Model override (optional)
 ```
 
 - `SUBNOTES_MODE` - Controls what gets injected. `whisper` (default, messages only), `full` (blocks + messages), `off` (disable). See [Modes](#modes).
 - `SUBNOTES_HOME` - Base directory for plugin state files. Creates `{SUBNOTES_HOME}/.subnotes/` for session data and memory blocks. Defaults to current working directory. Set to `$HOME` to consolidate all state in one location.
-- `SUBNOTES_SDK_TOOLS` - Controls client-side tool access for the SubNotes agent. `read-only` (default), `full`, or `off`. See [SDK Tools](#sdk-tools).
+- `SUBNOTES_SDK_TOOLS` - Controls client-side tool access for the Reflect agent. `read-only` (default), `full`, or `off`. See [SDK Tools](#sdk-tools).
 - `SUBNOTES_DEBUG` - Set to `1` to enable debug logging.
 - `SUBNOTES_IDLE_TIMEOUT` - Optional idle timeout in milliseconds for the detached worker. Default `1800000` (30 min). Set to `0` to disable idle self-termination.
 - `SUBNOTES_MAX_CONTINUATIONS` - Max self-continuation cycles the agent can run per transcript batch. Default `2`.
@@ -121,15 +121,15 @@ The `SUBNOTES_MODE` environment variable controls what gets injected into Claude
 
 | Mode | What Claude sees | Use case |
 |------|-----------------|----------|
-| **`whisper`** (default) | Only messages from SubNotes | Lightweight — SubNotes speaks when it has something to say |
+| **`whisper`** (default) | Only messages from Reflect | Lightweight — Reflect speaks when it has something to say |
 | **`full`** | Memory blocks + messages | Full context — blocks on first prompt, diffs after |
 | **`off`** | Nothing | Disable hooks temporarily |
 
-SubNotes **never writes to CLAUDE.md** in any mode. All content is injected via stdout into the prompt context. Legacy `<subnotes>` content in CLAUDE.md will be cleaned up automatically.
+Reflect **never writes to CLAUDE.md** in any mode. All content is injected via stdout into the prompt context. Legacy `<subnotes>` content in CLAUDE.md will be cleaned up automatically.
 
 ### Multi-Project Usage
 
-SubNotes memory is stored per-project in `.subnotes/` directory. Each project maintains its own memory blocks and session history. To share memory across projects, set `SUBNOTES_HOME` to a common directory:
+Reflect memory is stored per-project in `.subnotes/` directory. Each project maintains its own memory blocks and session history. To share memory across projects, set `SUBNOTES_HOME` to a common directory:
 
 ```bash
 # Share memory across all projects
@@ -138,9 +138,13 @@ export SUBNOTES_HOME="$HOME"
 
 This creates `~/.subnotes/` for shared state, or you can point to a specific directory for project groups.
 
+## Subconscious Insights
+
+Alongside explicit memory blocks, Reflect maintains a "Subconscious" System 1 (the Crystallizer). It continuously tracks behaviors, groups temporal observations, and generates **Historical Narrative Insights**. Instead of simply returning generic warnings, it detects recurrences of previous struggles or patterns across sessions and seamlessly injects them before tool use via the `<subconscious_insight>` tag. This provides deeply contextualized, chronological warnings based on your true historical workflow.
+
 ## Memory Blocks
 
-SubNotes maintains persistent memory blocks that evolve over time:
+Reflect maintains persistent memory blocks that evolve over time:
 
 | Block | Purpose |
 |-------|---------|
@@ -153,7 +157,7 @@ SubNotes maintains persistent memory blocks that evolve over time:
 
 ### Communication Style
 
-SubNotes is configured to be:
+Reflect is configured to be:
 
 - **Observational** - "I noticed..." not "You should..."
 - **Concise** - Technical, no filler
@@ -161,7 +165,7 @@ SubNotes is configured to be:
 
 ### Two-Way Communication
 
-Claude Code can address the SubNotes agent directly in responses. The agent sees everything in the transcript and may respond on the next sync. It's designed for ongoing dialogue, not just one-way observation.
+Claude Code can address the Reflect agent directly in responses. The agent sees everything in the transcript and may respond on the next sync. It's designed for ongoing dialogue, not just one-way observation.
 
 ## Hooks
 
@@ -170,10 +174,10 @@ The plugin uses five Claude Code hooks:
 | Hook | Script | Timeout | Purpose |
 |------|--------|---------|---------|
 | `SessionStart` | `session_start.ts` | 5s | Initializes session, starts continuous worker |
-| `UserPromptSubmit` | `stream_transcript.ts` + `sync_local_memory.ts` | 3s + 10s | Streams user input + injects memory/messages |
+| `UserPromptSubmit` | `stream_transcript.ts` + `sync_local_memory.ts` | 3s + 10s | Streams user input + injects memory/messages/insights |
 | `PostToolUse` | `stream_transcript.ts` | 3s | Streams tool events to the continuous worker |
-| `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow hidden whispers via `additionalContext` |
-| `Stop` | `stop_sync.ts` | 5s | Blocks stop if SubNotes has unread messages; injects them |
+| `PreToolUse` | `pretool_sync.ts` | 5s | Mid-workflow hidden whispers & insights via `additionalContext` |
+| `Stop` | `stop_sync.ts` | 5s | Blocks stop if Reflect has unread messages; injects them |
 | `SessionEnd` | `stop_continuous_worker.ts` | 5s | Stops the session worker and cleans up PID files |
 
 ### SessionStart
@@ -191,25 +195,26 @@ Before each prompt is processed:
 - Streams the prompt to the continuous transcript queue
 - Loads agent's current memory blocks and messages
 - In `full` mode: injects all blocks on first prompt, diffs on subsequent prompts
-- In `whisper` mode: injects only messages from SubNotes
+- In `whisper` mode: injects only messages from Reflect
 
 ### PreToolUse
 
 Before each tool use:
 - Checks for memory changes since last sync
-- Injects changed memory blocks and any unread SubNotes messages via `additionalContext`
+- Injects changed memory blocks and any unread Reflect messages via `additionalContext`
+- Also injects `<subconscious_insight>` if new behavioral patterns match
 - Silent no-op if nothing changed
 
 ### PostToolUse
 
 After each tool call:
 - Streams tool execution metadata/results into transcript queue
-- Enables SubNotes to reason between tool calls, not only between prompts
+- Enables Reflect to reason between tool calls, not only between prompts
 
 ### Stop
 
 When Claude is about to stop responding:
-- Checks if the SubNotes agent has posted any unread messages
+- Checks if the Reflect agent has posted any unread messages
 - If unread messages exist, blocks the stop and injects them into the conversation — Claude renders the thought as `**Subconscious thought** — [key point]` and continues
 - Once all messages are marked read, exits silently and Claude stops normally
 - Errors exit with code 0 (never disrupts the stop flow)
@@ -223,7 +228,7 @@ When a Claude Code session ends:
 
 ### SDK Tools
 
-SubNotes has access to tools during transcript processing:
+Reflect has access to tools during transcript processing:
 
 **Configuration via `SUBNOTES_SDK_TOOLS`:**
 
@@ -231,14 +236,14 @@ SubNotes has access to tools during transcript processing:
 |------|----------------|----------|
 | `read-only` (default) | `Read`, `Grep`, `Glob`, `web_search`, `fetch_webpage` | Safe file reading and searching only |
 | `full` | All tools including `Read`, `Grep`, `Glob` + future tools | Reserved for future expansion |
-| `off` | None (memory-only) | Listen-only — SubNotes processes transcripts but can't read files |
+| `off` | None (memory-only) | Listen-only — Reflect processes transcripts but can't read files |
 
 ### Continuous Worker
 
-SubNotes runs as a single continuous execution model:
+Reflect runs as a single continuous execution model:
 - Session start spawns one worker per session (`send_worker_continuous.ts`)
 - Worker consumes streamed transcript events (`UserPromptSubmit` + `PostToolUse`)
-- Worker updates memory blocks and queues SubNotes whispers in near real-time
+- Worker updates memory blocks and queues Reflect whispers in near real-time
 - `PreToolUse` injects the freshest state back into Claude before each tool call
 - `Stop` delivers any queued messages before Claude stops responding
 - `SessionEnd` shuts down the session worker; idle workers also self-terminate (default: 30 minutes without transcript changes)
@@ -253,10 +258,10 @@ The plugin stores state in two locations:
 
 Persisted in your project directory (or `$SUBNOTES_HOME/.subnotes/{repoHash}/` if set):
 - `memory.json` - Memory blocks storage
-- `conversation.json` - Messages from SubNotes to Claude Code
+- `conversation.json` - Messages from Reflect to Claude Code
 - `session-{repoHash}-{id}.json` - Per-session state (last processed index)
 - Session/transcript files are namespaced by a repo hash to avoid collisions across repos when sharing `SUBNOTES_HOME`
-- If `Subconscious.af` exists in repo root, SubNotes uses it as the template source for system prompt + default/required memory block structure
+- If `Subconscious.af` exists in repo root, Reflect uses it as the template source for system prompt + default/required memory block structure
 
 ### Temporary State (`$TMPDIR/subnotes-sync-$UID/`)
 
@@ -265,9 +270,9 @@ Log files for debugging:
 - `sync_local_memory.log` - Memory sync operations
 - `send_worker_continuous.log` - Continuous background worker
 
-## What SubNotes Receives
+## What Reflect Receives
 
-SubNotes processes the full conversation transcript with:
+Reflect processes the full conversation transcript with:
 - User messages
 - Assistant responses (including thinking blocks)
 - Tool uses and results
@@ -279,10 +284,10 @@ All content is injected via stdout — nothing is written to disk. What Claude r
 
 ### Messages (whisper + full mode)
 
-Messages from SubNotes are injected before each prompt:
+Messages from Reflect are injected before each prompt:
 
 ```xml
-<subnotes_message from="SubNotes" timestamp="2026-03-27T08:42:51.133Z">
+<subnotes_message from="Reflect" timestamp="2026-03-27T08:42:51.133Z">
 You've asked about error handling in async contexts three times this week.
 Consider reviewing error handling architecture holistically.
 </subnotes_message>
@@ -294,7 +299,7 @@ On the first prompt of a session, all memory blocks are injected:
 
 ```xml
 <subnotes_context>
-SubNotes agent is watching this session and whispering guidance.
+Reflect agent is watching this session and whispering guidance.
 It can read files, search your codebase, and browse the web (read-only).
 </subnotes_context>
 
@@ -349,8 +354,9 @@ tail -f /tmp/subnotes-sync-$(id -u)/send_worker_continuous.log
 - Memory stored in local JSON files (`.subnotes/memory.json`)
 - Agent powered by Anthropic SDK (`@anthropic-ai/sdk`)
 - Continuous worker runs detached and processes transcript events in real-time
-- Tool handlers are modularized under `scripts/framework/tools/` (`memory`, `conversation_search`, `web_search`, `fetch_webpage`, `Read`, `Glob`, `Grep`)
-- Memory updates via tool calls: `memory`, `memory_replace`, `memory_insert`, `memory_rethink`
+- Core script logic is modularized under `scripts/framework/` (I/O, memory diffing, agent loop)
+- The behavioral tracking and history (System 1) lives in `scripts/autonomic/`
+- Tool handlers are modularized under `scripts/framework/tools/`
 
 For a comprehensive technical overview of the system design, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
