@@ -42,6 +42,7 @@ import {
   loadSentinelState,
   checkSentinelTriggers,
   recordSentinelWarnings,
+  queueSentinelWarningsForObservation,
   saveSentinelState,
   formatSentinelWarnings,
 } from './framework/sentinel.js';
@@ -139,16 +140,16 @@ function buildCorrectOutput(
 // ============================================
 
 async function main(): Promise<void> {
-  const mode = getMode();
-  if (mode === 'off') {
-    process.exit(0);
-  }
-
   try {
     const hookInput = await readHookInput<PreToolInput>();
 
     if (!hookInput?.session_id || !hookInput?.cwd) {
       debug('Missing session_id or cwd, skipping');
+      process.exit(0);
+    }
+
+    const mode = getMode(hookInput.cwd);
+    if (mode === 'off') {
       process.exit(0);
     }
 
@@ -221,7 +222,10 @@ async function main(): Promise<void> {
           debug(`Sentinel warnings: ${warnings.length}`);
 
           // Record sentinel warnings
-          const updatedSentinel = recordSentinelWarnings(sentinelState, warnings);
+          const updatedSentinel = queueSentinelWarningsForObservation(
+            recordSentinelWarnings(sentinelState, warnings),
+            warnings,
+          );
           saveSentinelState(hookInput.session_id, updatedSentinel);
 
           // Record sentinel interventions (System 3)

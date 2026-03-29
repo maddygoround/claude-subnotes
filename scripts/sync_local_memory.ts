@@ -25,7 +25,7 @@ import {
   saveSyncState,
   loadLocalMemory,
   formatAllBlocksForStdout,
-  cleanSubNotesFromClaudeMd,
+  syncClaudeMdFromMemory,
   getMode,
 } from './conversation_utils.js';
 
@@ -39,17 +39,17 @@ interface SyncHookInput {
 }
 
 async function main(): Promise<void> {
-  const mode = getMode();
-  if (mode === 'off') {
-    process.exit(0);
-  }
-
   const projectDir = process.cwd();
 
   try {
     const hookInput = await readHookInput<SyncHookInput>();
     const cwd = hookInput?.cwd || projectDir;
     const sessionId = hookInput?.session_id;
+    const mode = getMode(cwd);
+
+    if (mode === 'off') {
+      process.exit(0);
+    }
 
     let state = sessionId ? loadSyncState(cwd, sessionId) : null;
     const lastBlockValues = state?.lastBlockValues || null;
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
 
     const changedBlocks = detectChangedBlocks(memoryBlocks, lastBlockValues);
 
-    cleanSubNotesFromClaudeMd(cwd);
+    syncClaudeMdFromMemory(cwd, memoryBlocks);
 
     // Update state snapshot
     if (state) {
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
       const isFirstPrompt = !lastBlockValues;
 
       if (isFirstPrompt) {
-        outputs.push(formatAllBlocksForStdout(memoryBlocks));
+        outputs.push(formatAllBlocksForStdout(memoryBlocks, cwd));
       } else {
         const changedBlocksOutput = formatChangedBlocksAsXml(
           changedBlocks,

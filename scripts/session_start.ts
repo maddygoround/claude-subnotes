@@ -18,7 +18,6 @@ import {
   createFileLogger,
 } from './framework/index.js';
 import {
-  cleanSubNotesFromClaudeMd,
   getMode,
   getTempStateDir,
   getSdkToolsMode,
@@ -27,6 +26,8 @@ import {
   loadConfig,
   ensureConfigFile,
   ensureContinuousWorker,
+  syncClaudeMdFromMemory,
+  cleanSubNotesFromClaudeMd,
 } from './conversation_utils.js';
 
 // Configuration
@@ -44,21 +45,22 @@ async function main(): Promise<void> {
   log('='.repeat(60));
   log('session_start.ts started');
 
-  const mode = getMode();
-  log(`Mode: ${mode}`);
-  if (mode === 'off') {
-    log('Mode is off, exiting');
-    process.exit(0);
-  }
-
   try {
     // Read hook input
     log('Reading hook input from stdin...');
     const hookInput = await readHookInputStrict<SessionStartInput>();
     log(`Hook input: session_id=${hookInput.session_id}, cwd=${hookInput.cwd}`);
 
-    // Initialize or load local memory
-    loadLocalMemory(hookInput.cwd, log);
+    const mode = getMode(hookInput.cwd);
+    log(`Mode: ${mode}`);
+    if (mode === 'off') {
+      log('Mode is off, exiting');
+      process.exit(0);
+    }
+
+    // Initialize or load local memory, then project it into CLAUDE.md
+    const memoryBlocks = loadLocalMemory(hookInput.cwd, log);
+    syncClaudeMdFromMemory(hookInput.cwd, memoryBlocks);
 
     // Ensure config.json exists with defaults and load config
     ensureConfigFile(hookInput.cwd, log);
@@ -88,16 +90,12 @@ async function main(): Promise<void> {
       log('Continuous worker already running');
     }
 
-    // Clean up any existing <subnotes> section from CLAUDE.md
-    log('Cleaning up any legacy CLAUDE.md content...');
-    cleanSubNotesFromClaudeMd(hookInput.cwd);
-
     const homeDir = process.env.HOME || os.homedir();
     if (homeDir !== hookInput.cwd) {
-      log('Cleaning up global ~/.claude/CLAUDE.md...');
+      log('Cleaning up legacy global ~/.claude/CLAUDE.md content...');
       cleanSubNotesFromClaudeMd(homeDir);
     }
-    log('CLAUDE.md cleanup done');
+    log('Project CLAUDE.md synced from .subnotes');
 
     log('Completed successfully');
   } catch (error) {

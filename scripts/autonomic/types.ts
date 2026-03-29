@@ -258,6 +258,8 @@ export interface SentinelState {
   recent_files_created: Record<string, FileCreationRecord>;
   /** Recent intervention IDs for deduplication */
   recent_sentinel_warnings: string[];
+  /** Warning types that should be attached to the next observation */
+  pending_observation_warnings: SentinelWarningType[];
 }
 
 export type SentinelWarningType =
@@ -357,6 +359,7 @@ export function createDefaultSentinelState(sessionId: string): SentinelState {
     consecutive_test_failures: 0,
     recent_files_created: {},
     recent_sentinel_warnings: [],
+    pending_observation_warnings: [],
   };
 }
 

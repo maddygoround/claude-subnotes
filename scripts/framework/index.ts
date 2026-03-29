@@ -25,6 +25,7 @@ export {
 export {
   appendAgentMessage,
   fetchUnreadAgentMessages,
+  peekUnreadAgentMessages,
   formatMessagesForStdout,
   formatMessagesForHookContext,
   generateForegroundInstruction,

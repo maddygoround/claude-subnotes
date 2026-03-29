@@ -156,6 +156,28 @@ export function fetchUnreadAgentMessages(
   }
 }
 
+/**
+ * Inspect unread agent messages without marking them as read.
+ */
+export function peekUnreadAgentMessages(
+  cwd: string,
+  log?: LogFn,
+): AgentMessage[] {
+  const messagesFile = getAgentMessagesFile(cwd);
+  if (!fs.existsSync(messagesFile)) {
+    return [];
+  }
+
+  try {
+    const raw = fs.readFileSync(messagesFile, 'utf-8');
+    const messages = normalizeAgentMessages(JSON.parse(raw));
+    return messages.filter((message) => !message.read);
+  } catch (error) {
+    log?.(`Error peeking agent messages: ${error}`);
+    return [];
+  }
+}
+
 // ============================================
 // Format
 // ============================================

@@ -130,13 +130,17 @@ export function matchReflexRules(
   );
 
   // Build hook action from the matched rule
-  return buildHookAction(bestMatch, metaConfig);
+  return buildHookAction(bestMatch, metaConfig, toolInput);
 }
 
 /**
  * Convert a matched reflex rule into a hook action.
  */
-function buildHookAction(rule: ReflexRule, metaConfig: MetaConfig): HookAction {
+function buildHookAction(
+  rule: ReflexRule,
+  metaConfig: MetaConfig,
+  toolInput: unknown,
+): HookAction {
   switch (rule.action.type) {
     case 'deny':
       return {
@@ -168,8 +172,62 @@ function buildHookAction(rule: ReflexRule, metaConfig: MetaConfig): HookAction {
         };
       }
 
+      if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+        return {
+          type: 'whisper',
+          content:
+            rule.action.content ||
+            `Pattern detected (confidence: ${rule.confidence.toFixed(2)})`,
+          source_rule_id: rule.id,
+        };
+      }
+
+      const rawInput = toolInput as Record<string, unknown>;
+      const currentValue = rawInput[rule.action.field];
+      if (typeof currentValue !== 'string') {
+        return {
+          type: 'whisper',
+          content:
+            rule.action.content ||
+            `Pattern detected (confidence: ${rule.confidence.toFixed(2)})`,
+          source_rule_id: rule.id,
+        };
+      }
+
+      let updatedValue: string;
+      try {
+        updatedValue = currentValue.replace(
+          new RegExp(rule.action.match, 'g'),
+          rule.action.replacement,
+        );
+      } catch {
+        return {
+          type: 'whisper',
+          content:
+            rule.action.content ||
+            `Pattern detected (confidence: ${rule.confidence.toFixed(2)})`,
+          source_rule_id: rule.id,
+        };
+      }
+
+      if (updatedValue === currentValue) {
+        return {
+          type: 'whisper',
+          content:
+            rule.action.content ||
+            `Pattern detected (confidence: ${rule.confidence.toFixed(2)})`,
+          source_rule_id: rule.id,
+        };
+      }
+
+      const updatedInput = {
+        ...rawInput,
+        [rule.action.field]: updatedValue,
+      };
+
       return {
         type: 'correct',
+        updatedInput,
         content:
           rule.action.content ||
           `Auto-corrected: ${rule.action.field} (confidence: ${rule.confidence.toFixed(2)})`,

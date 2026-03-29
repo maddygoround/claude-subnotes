@@ -20,6 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // CLAUDE.md constants
+export const ROOT_CLAUDE_MD_PATH = 'CLAUDE.md';
 export const CLAUDE_MD_PATH = '.claude/CLAUDE.md';
 export const SUBNOTES_SECTION_START = '<subnotes>';
 export const SUBNOTES_SECTION_END = '</subnotes>';
@@ -27,6 +28,14 @@ const SUBNOTES_CONTEXT_START = '<subnotes_context>';
 const SUBNOTES_CONTEXT_END = '</subnotes_context>';
 const SUBNOTES_MEMORY_START = '<subnotes_memory_blocks>';
 const SUBNOTES_MEMORY_END = '</subnotes_memory_blocks>';
+const DISTILLED_CLAUDE_MD_COMMENT =
+  '<!-- SubNotes distilled context is automatically synced below -->';
+const DISTILLED_CLAUDE_MD_MAX_CHARS = 5000;
+const DISTILLED_CLAUDE_MD_MIN_SECTION_BUDGET = 160;
+const DISTILLED_CLAUDE_MD_TRUNCATION_NOTICE =
+  '[Truncated in CLAUDE.md. Full canonical state lives in .subnotes.]';
+const DISTILLED_CLAUDE_MD_OMISSION_NOTICE =
+  '[Additional subconscious state omitted here to protect CLAUDE.md context budget. Canonical state lives in .subnotes.]';
 
 // ============================================
 // Configuration — all settings live in config.json
@@ -325,6 +334,15 @@ export interface SyncState {
   sessionId: string;
   lastBlockValues?: { [label: string]: string };
   lastSeenMessageId?: string;
+  lastMirroredTranscriptLine?: number;
+  pendingToolUses?: Record<
+    string,
+    {
+      name: string;
+      input: unknown;
+      timestamp: string;
+    }
+  >;
 }
 
 export interface MemoryBlock {
@@ -434,6 +452,50 @@ function parseSyncStateData(
     parsed.lastSeenMessageId = candidate.lastSeenMessageId;
   }
 
+  if (typeof candidate.lastMirroredTranscriptLine === 'number') {
+    parsed.lastMirroredTranscriptLine = candidate.lastMirroredTranscriptLine;
+  }
+
+  if (
+    candidate.pendingToolUses &&
+    typeof candidate.pendingToolUses === 'object'
+  ) {
+    const pendingEntries = Object.entries(candidate.pendingToolUses)
+      .filter(([toolUseId, value]) => {
+        if (!toolUseId || !value || typeof value !== 'object') {
+          return false;
+        }
+        const candidateValue = value as {
+          name?: unknown;
+          input?: unknown;
+          timestamp?: unknown;
+        };
+        return (
+          typeof candidateValue.name === 'string' &&
+          typeof candidateValue.timestamp === 'string'
+        );
+      })
+      .map(([toolUseId, value]) => {
+        const candidateValue = value as {
+          name: string;
+          input?: unknown;
+          timestamp: string;
+        };
+        return [
+          toolUseId,
+          {
+            name: candidateValue.name,
+            input: candidateValue.input,
+            timestamp: candidateValue.timestamp,
+          },
+        ] as const;
+      });
+
+    if (pendingEntries.length > 0) {
+      parsed.pendingToolUses = Object.fromEntries(pendingEntries);
+    }
+  }
+
   return parsed;
 }
 
@@ -524,7 +586,71 @@ export function loadSyncState(cwd: string, sessionId: string, log: LogFn = noopL
 export function saveSyncState(cwd: string, state: SyncState, log: LogFn = noopLog): void {
   ensureDurableStateDir(cwd);
   const statePath = getSyncStateFile(cwd, state.sessionId);
-  writeJsonFileAtomic(statePath, state, log);
+  withProcessLock(
+    `${statePath}.lock`,
+    () => {
+      const existingState = parseSyncStateData(
+        readJsonFileWithFallback<unknown>(statePath, null, log),
+        state.sessionId,
+      );
+
+      const mergedState: SyncState = {
+        lastProcessedIndex: state.lastProcessedIndex,
+        sessionId: state.sessionId,
+      };
+
+      if (Object.prototype.hasOwnProperty.call(state, 'lastBlockValues')) {
+        if (state.lastBlockValues) {
+          mergedState.lastBlockValues = state.lastBlockValues;
+        }
+      } else if (existingState?.lastBlockValues) {
+        mergedState.lastBlockValues = existingState.lastBlockValues;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(state, 'lastSeenMessageId')) {
+        if (state.lastSeenMessageId) {
+          mergedState.lastSeenMessageId = state.lastSeenMessageId;
+        }
+      } else if (existingState?.lastSeenMessageId) {
+        mergedState.lastSeenMessageId = existingState.lastSeenMessageId;
+      }
+
+      if (
+        Object.prototype.hasOwnProperty.call(state, 'lastMirroredTranscriptLine')
+      ) {
+        if (typeof state.lastMirroredTranscriptLine === 'number') {
+          mergedState.lastMirroredTranscriptLine =
+            state.lastMirroredTranscriptLine;
+        }
+      } else if (
+        typeof existingState?.lastMirroredTranscriptLine === 'number'
+      ) {
+        mergedState.lastMirroredTranscriptLine =
+          existingState.lastMirroredTranscriptLine;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(state, 'pendingToolUses')) {
+        if (
+          state.pendingToolUses &&
+          Object.keys(state.pendingToolUses).length > 0
+        ) {
+          mergedState.pendingToolUses = state.pendingToolUses;
+        }
+      } else if (
+        existingState?.pendingToolUses &&
+        Object.keys(existingState.pendingToolUses).length > 0
+      ) {
+        mergedState.pendingToolUses = existingState.pendingToolUses;
+      }
+
+      writeJsonFileAtomic(statePath, mergedState, log);
+    },
+    {
+      log,
+      timeoutMs: 1500,
+      staleMs: 15000,
+    },
+  );
   log(`Saved state: lastProcessedIndex=${state.lastProcessedIndex}`);
 }
 
@@ -926,6 +1052,7 @@ export function saveLocalMemory(
       );
 
       writeJsonFileAtomic(memoryFile, normalizedBlocks, log);
+      syncClaudeMdFromMemory(cwd, normalizedBlocks);
       log(
         options.baseBlocks
           ? 'Saved memory blocks to disk with merge-on-save'
@@ -977,6 +1104,125 @@ Memory blocks below are the agent's long-term storage. Reference as needed.
 ${SUBNOTES_CONTEXT_END}`;
 }
 
+function isPlaceholderMemoryValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return /^\(No [^)]+\)$/.test(trimmed);
+}
+
+function trimDistilledSectionContent(value: string, maxChars: number): string {
+  const trimmed = value.trim();
+  if (maxChars <= 0) {
+    return '';
+  }
+
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+
+  const notice = `\n\n${DISTILLED_CLAUDE_MD_TRUNCATION_NOTICE}`;
+  if (maxChars <= notice.length + 40) {
+    return trimmed.slice(0, maxChars).trimEnd();
+  }
+
+  const availableChars = Math.max(0, maxChars - notice.length);
+  return `${trimmed.slice(0, availableChars).trimEnd()}${notice}`;
+}
+
+interface DistilledClaudeSectionConfig {
+  label: string;
+  title: string;
+  maxChars: number;
+  fallback?: string;
+}
+
+interface ClaudeMdTargetResolution {
+  baseDir: string;
+  canonicalPath: string;
+  canonicalExisted: boolean;
+  alternatePath: string | null;
+}
+
+const DISTILLED_CLAUDE_SECTIONS: DistilledClaudeSectionConfig[] = [
+  {
+    label: 'guidance',
+    title: 'Active Guidance',
+    maxChars: 1200,
+    fallback: 'No active guidance right now.',
+  },
+  {
+    label: 'pending_items',
+    title: 'Pending Items',
+    maxChars: 1200,
+  },
+  {
+    label: 'project_context',
+    title: 'Project Context',
+    maxChars: 1800,
+  },
+  {
+    label: 'user_preferences',
+    title: 'User Preferences',
+    maxChars: 1200,
+  },
+  {
+    label: 'session_patterns',
+    title: 'Relevant Patterns',
+    maxChars: 1200,
+  },
+];
+
+function hasMeaningfulDistilledValue(
+  blockMap: Map<string, MemoryBlock>,
+  sectionConfig: DistilledClaudeSectionConfig,
+): boolean {
+  const block = blockMap.get(sectionConfig.label);
+  if (!block) {
+    return Boolean(sectionConfig.fallback);
+  }
+
+  return !isPlaceholderMemoryValue(block.value);
+}
+
+function renderDistilledSection(
+  sectionConfig: DistilledClaudeSectionConfig,
+  block: MemoryBlock | undefined,
+  remainingBudget: number,
+): string {
+  const sectionHeader = `## ${sectionConfig.title}\n`;
+  const availableBodyBudget = remainingBudget - sectionHeader.length;
+  if (availableBodyBudget <= 0) {
+    return '';
+  }
+
+  const rawValue = block?.value || '';
+  let sectionBody = '';
+
+  if (!block || isPlaceholderMemoryValue(rawValue)) {
+    if (!sectionConfig.fallback) {
+      return '';
+    }
+    sectionBody = trimDistilledSectionContent(
+      sectionConfig.fallback,
+      availableBodyBudget,
+    );
+  } else {
+    sectionBody = trimDistilledSectionContent(
+      rawValue,
+      Math.min(sectionConfig.maxChars, availableBodyBudget),
+    );
+  }
+
+  if (!sectionBody.trim()) {
+    return '';
+  }
+
+  return `${sectionHeader}${sectionBody}`;
+}
+
 export function formatMemoryBlocksAsXml(blocks: MemoryBlock[]): string {
   const contextSection = formatContextSection();
 
@@ -1005,24 +1251,136 @@ ${SUBNOTES_MEMORY_END}
 ${SUBNOTES_SECTION_END}`;
 }
 
-export function updateClaudeMd(projectDir: string, subnotesContent: string): void {
-  const config = _configCache;
-  const base = config?.projectDir || projectDir;
-  const claudeMdPath = path.join(base, CLAUDE_MD_PATH);
+export function formatDistilledClaudeMd(blocks: MemoryBlock[]): string {
+  const blockMap = new Map(blocks.map((block) => [block.label, block]));
+  const contextSection =
+    `${SUBNOTES_CONTEXT_START}\n` +
+    `This section is auto-generated from \`.subnotes\` and is a distilled foreground view for Claude.\n` +
+    `Canonical memory, transcripts, rules, and history live under \`.subnotes\`.\n` +
+    `Do not treat this section as the source of truth.\n` +
+    `${SUBNOTES_CONTEXT_END}`;
+  const prefix = `${SUBNOTES_SECTION_START}\n${contextSection}\n\n`;
+  const suffix = `\n${SUBNOTES_SECTION_END}`;
+  let remainingBudget =
+    DISTILLED_CLAUDE_MD_MAX_CHARS - prefix.length - suffix.length;
+  const renderedSections: string[] = [];
+  let omittedDueToBudget = false;
 
-  let existingContent = '';
-
-  if (fs.existsSync(claudeMdPath)) {
-    existingContent = fs.readFileSync(claudeMdPath, 'utf-8');
-  } else {
-    const claudeDir = path.dirname(claudeMdPath);
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
+  for (const sectionConfig of DISTILLED_CLAUDE_SECTIONS) {
+    if (!hasMeaningfulDistilledValue(blockMap, sectionConfig)) {
+      continue;
     }
-    existingContent = `# Project Context\n\n<!-- SubNotes agent memory is automatically synced below -->\n`;
+
+    const separatorLength = renderedSections.length > 0 ? 2 : 0;
+    const sectionBudget = remainingBudget - separatorLength;
+    if (sectionBudget < DISTILLED_CLAUDE_MD_MIN_SECTION_BUDGET) {
+      omittedDueToBudget = true;
+      continue;
+    }
+
+    const renderedSection = renderDistilledSection(
+      sectionConfig,
+      blockMap.get(sectionConfig.label),
+      sectionBudget,
+    );
+    if (!renderedSection) {
+      omittedDueToBudget = true;
+      continue;
+    }
+
+    renderedSections.push(renderedSection);
+    remainingBudget -= renderedSection.length + separatorLength;
   }
 
-  const subnotesPattern = `^${escapeRegex(SUBNOTES_SECTION_START)}[\\s\\S]*?^${escapeRegex(SUBNOTES_SECTION_END)}$`;
+  if (renderedSections.length === 0) {
+    const fallbackSection = renderDistilledSection(
+      DISTILLED_CLAUDE_SECTIONS[0],
+      blockMap.get(DISTILLED_CLAUDE_SECTIONS[0].label),
+      remainingBudget,
+    );
+    if (fallbackSection) {
+      renderedSections.push(fallbackSection);
+      remainingBudget -= fallbackSection.length;
+    }
+  }
+
+  if (
+    omittedDueToBudget &&
+    remainingBudget > DISTILLED_CLAUDE_MD_MIN_SECTION_BUDGET
+  ) {
+    const omissionSection = renderDistilledSection(
+      {
+        label: '__budget_notice__',
+        title: 'Additional Context',
+        maxChars: DISTILLED_CLAUDE_MD_OMISSION_NOTICE.length,
+        fallback: DISTILLED_CLAUDE_MD_OMISSION_NOTICE,
+      },
+      undefined,
+      remainingBudget - (renderedSections.length > 0 ? 2 : 0),
+    );
+
+    if (omissionSection) {
+      renderedSections.push(omissionSection);
+      remainingBudget -= omissionSection.length + (renderedSections.length > 1 ? 2 : 0);
+    }
+  }
+
+  const distilledBody =
+    renderedSections.length > 0
+      ? renderedSections.join('\n\n')
+      : '## Active Guidance\nNo distilled subconscious context yet.';
+
+  return `${prefix}${distilledBody}${suffix}`;
+}
+
+function resolveClaudeMdBaseDir(projectDir: string): string {
+  const config = loadConfig(projectDir);
+  return config.projectDir || projectDir;
+}
+
+function resolveClaudeMdTargets(projectDir: string): ClaudeMdTargetResolution {
+  const baseDir = resolveClaudeMdBaseDir(projectDir);
+  const rootClaudeMdPath = path.join(baseDir, ROOT_CLAUDE_MD_PATH);
+  const scopedClaudeMdPath = path.join(baseDir, CLAUDE_MD_PATH);
+  const rootExists = fs.existsSync(rootClaudeMdPath);
+  const scopedExists = fs.existsSync(scopedClaudeMdPath);
+
+  if (rootExists) {
+    return {
+      baseDir,
+      canonicalPath: rootClaudeMdPath,
+      canonicalExisted: true,
+      alternatePath: scopedExists ? scopedClaudeMdPath : null,
+    };
+  }
+
+  if (scopedExists) {
+    return {
+      baseDir,
+      canonicalPath: scopedClaudeMdPath,
+      canonicalExisted: true,
+      alternatePath: null,
+    };
+  }
+
+  return {
+    baseDir,
+    canonicalPath: scopedClaudeMdPath,
+    canonicalExisted: false,
+    alternatePath: null,
+  };
+}
+
+function getClaudeMdBootstrapContent(): string {
+  return `# Project Context\n\n${DISTILLED_CLAUDE_MD_COMMENT}\n`;
+}
+
+function upsertGeneratedSubnotesSection(
+  existingContent: string,
+  subnotesContent: string,
+): string {
+  const subnotesPattern =
+    `^${escapeRegex(SUBNOTES_SECTION_START)}[\\s\\S]*?^${escapeRegex(SUBNOTES_SECTION_END)}$`;
   const subnotesRegex = new RegExp(subnotesPattern, 'gm');
 
   let updatedContent: string;
@@ -1031,60 +1389,131 @@ export function updateClaudeMd(projectDir: string, subnotesContent: string): voi
     subnotesRegex.lastIndex = 0;
     updatedContent = existingContent.replace(subnotesRegex, subnotesContent);
   } else {
-    updatedContent = existingContent.trimEnd() + '\n\n' + subnotesContent + '\n';
+    updatedContent =
+      existingContent.trimEnd() + '\n\n' + subnotesContent + '\n';
   }
 
   const messagePattern = /^<subnotes_message>[\s\S]*?^<\/subnotes_message>\n*/gm;
   updatedContent = updatedContent.replace(messagePattern, '');
-  updatedContent = updatedContent.trimEnd() + '\n';
-
-  fs.writeFileSync(claudeMdPath, updatedContent, 'utf-8');
+  return updatedContent.trimEnd() + '\n';
 }
 
-export function cleanSubNotesFromClaudeMd(projectDir: string): void {
-  const config = _configCache;
-  const base = config?.projectDir || projectDir;
-  const claudeMdPath = path.join(base, CLAUDE_MD_PATH);
-
-  if (!fs.existsSync(claudeMdPath)) {
-    return;
-  }
-
-  const content = fs.readFileSync(claudeMdPath, 'utf-8');
-
-  // Clean new subnotes tags for migration
+function stripGeneratedSubnotesContent(existingContent: string): string {
   const patterns = [
-    `^${escapeRegex(SUBNOTES_SECTION_START)}[\\s\\S]*?^${escapeRegex(SUBNOTES_SECTION_END)}\\n*`
+    `^${escapeRegex(SUBNOTES_SECTION_START)}[\\s\\S]*?^${escapeRegex(SUBNOTES_SECTION_END)}\\n*`,
   ];
 
-  let cleaned = content;
+  let cleaned = existingContent;
   for (const pattern of patterns) {
     const regex = new RegExp(pattern, 'gm');
     cleaned = cleaned.replace(regex, '');
   }
 
   const messagePatterns = [
-    /^<subnotes_message>[\s\S]*?^<\/subnotes_message>\n*/gm
+    /^<subnotes_message>[\s\S]*?^<\/subnotes_message>\n*/gm,
   ];
 
   for (const pattern of messagePatterns) {
     cleaned = cleaned.replace(pattern, '');
   }
 
-  cleaned = cleaned.replace(/<!-- (Subconscious|SubNotes) agent memory is automatically synced below -->\n*/g, '');
-  cleaned = cleaned.replace(/^# Project Context\n*/gm, '');
+  cleaned = cleaned.replace(
+    /<!-- (Subconscious|SubNotes) (agent memory|distilled context) is automatically synced below -->\n*/g,
+    '',
+  );
 
-  cleaned = cleaned.trim();
+  const trimmed = cleaned.trim();
+  if (!trimmed || trimmed === '# Project Context') {
+    return '';
+  }
 
-  if (cleaned.length === 0) {
-    fs.unlinkSync(claudeMdPath);
-  } else {
-    fs.writeFileSync(claudeMdPath, cleaned + '\n', 'utf-8');
+  return `${trimmed}\n`;
+}
+
+function cleanGeneratedSubnotesFromClaudeMdFile(filePath: string): void {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const existingContent = fs.readFileSync(filePath, 'utf-8');
+  const cleanedContent = stripGeneratedSubnotesContent(existingContent);
+
+  if (!cleanedContent) {
+    fs.unlinkSync(filePath);
+    return;
+  }
+
+  if (cleanedContent !== existingContent) {
+    fs.writeFileSync(filePath, cleanedContent, 'utf-8');
   }
 }
 
-export function formatAllBlocksForStdout(blocks: MemoryBlock[]): string {
-  const sdkToolsMode = getSdkToolsMode();
+export function updateClaudeMd(projectDir: string, subnotesContent: string): void {
+  const claudeMdLockPath = path.join(
+    getDurableStateDir(projectDir),
+    'claude-md-sync.lock',
+  );
+
+  withProcessLock(claudeMdLockPath, () => {
+    const targets = resolveClaudeMdTargets(projectDir);
+    let existingContent = '';
+
+    if (targets.canonicalExisted) {
+      existingContent = fs.readFileSync(targets.canonicalPath, 'utf-8');
+    } else {
+      const claudeDir = path.dirname(targets.canonicalPath);
+      if (!fs.existsSync(claudeDir)) {
+        fs.mkdirSync(claudeDir, { recursive: true });
+      }
+      existingContent = getClaudeMdBootstrapContent();
+    }
+
+    const updatedContent = upsertGeneratedSubnotesSection(
+      existingContent,
+      subnotesContent,
+    );
+
+    if (updatedContent === existingContent) {
+      if (targets.alternatePath) {
+        cleanGeneratedSubnotesFromClaudeMdFile(targets.alternatePath);
+      }
+      return;
+    }
+
+    fs.writeFileSync(targets.canonicalPath, updatedContent, 'utf-8');
+
+    if (targets.alternatePath) {
+      cleanGeneratedSubnotesFromClaudeMdFile(targets.alternatePath);
+    }
+  });
+}
+
+export function syncClaudeMdFromMemory(
+  cwd: string,
+  blocks: MemoryBlock[],
+): void {
+  updateClaudeMd(cwd, formatDistilledClaudeMd(blocks));
+}
+
+export function cleanSubNotesFromClaudeMd(projectDir: string): void {
+  const baseDir = resolveClaudeMdBaseDir(projectDir);
+  const candidatePaths = [
+    path.join(baseDir, ROOT_CLAUDE_MD_PATH),
+    path.join(baseDir, CLAUDE_MD_PATH),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (fs.existsSync(candidatePath)) {
+      cleanGeneratedSubnotesFromClaudeMdFile(candidatePath);
+    }
+  }
+}
+
+export function formatAllBlocksForStdout(
+  blocks: MemoryBlock[],
+  cwd?: string,
+): string {
+  const sdkToolsMode = getSdkToolsMode(cwd);
   const capabilityLine = sdkToolsMode === 'full'
     ? 'It can read files, search the web, and make changes to your codebase.'
     : sdkToolsMode === 'read-only'
@@ -1380,6 +1809,7 @@ export function appendTranscriptEntry(
   sessionId: string,
   entry: TranscriptEntry
 ): void {
+  ensureDurableStateDir(cwd);
   const transcriptPath = getContinuousTranscriptPath(cwd, sessionId);
   const jsonLine = JSON.stringify(entry) + '\n';
 
@@ -1389,6 +1819,294 @@ export function appendTranscriptEntry(
     // Fail silently - don't break hooks if transcript streaming fails
     console.error(`Failed to append transcript entry: ${error}`);
   }
+}
+
+interface ClaudeTranscriptContentBlock {
+  type?: string;
+  text?: unknown;
+  thinking?: unknown;
+  id?: unknown;
+  name?: unknown;
+  input?: unknown;
+  tool_use_id?: unknown;
+  content?: unknown;
+}
+
+interface ClaudeTranscriptRecord {
+  type?: string;
+  timestamp?: string;
+  message?: {
+    role?: string;
+    content?: ClaudeTranscriptContentBlock[] | unknown;
+  };
+}
+
+function stringifyTranscriptValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function collectTextBlocks(blocks: ClaudeTranscriptContentBlock[]): string[] {
+  const parts: string[] = [];
+
+  for (const block of blocks) {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const text = block.text.trim();
+      if (text) {
+        parts.push(text);
+      }
+      continue;
+    }
+
+    if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      const thinking = block.thinking.trim();
+      if (thinking) {
+        parts.push(`<thinking>\n${thinking}\n</thinking>`);
+      }
+    }
+  }
+
+  return parts;
+}
+
+function extractToolResultText(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return stringifyTranscriptValue(item);
+        }
+
+        const block = item as { type?: unknown; text?: unknown };
+        if (block.type === 'text' && typeof block.text === 'string') {
+          return block.text;
+        }
+
+        return stringifyTranscriptValue(item);
+      })
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (parts.length > 0) {
+      return parts.join('\n\n');
+    }
+  }
+
+  return stringifyTranscriptValue(value);
+}
+
+function buildToolEventContent(
+  toolName: string,
+  toolInput: unknown,
+  toolResponse: unknown,
+): string {
+  return (
+    `<tool_event>\n` +
+    `<name>${toolName}</name>\n` +
+    `<input>\n${stringifyTranscriptValue(toolInput)}\n</input>\n` +
+    `<response>\n${extractToolResultText(toolResponse)}\n</response>\n` +
+    `</tool_event>`
+  );
+}
+
+function parseClaudeTranscriptEntries(
+  lines: string[],
+  startIndex: number,
+  pendingToolUses: Record<
+    string,
+    {
+      name: string;
+      input: unknown;
+      timestamp: string;
+    }
+  >,
+  fallbackTimestamp: string,
+  log: LogFn = noopLog,
+): { entries: TranscriptEntry[]; latestLineIndex: number } {
+  const entries: TranscriptEntry[] = [];
+  let latestLineIndex = startIndex;
+
+  for (let index = startIndex + 1; index < lines.length; index++) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+
+    latestLineIndex = index;
+
+    let record: ClaudeTranscriptRecord;
+    try {
+      record = JSON.parse(line) as ClaudeTranscriptRecord;
+    } catch (error) {
+      log(`Failed to parse Claude transcript line ${index}: ${error}`);
+      continue;
+    }
+
+    if (!record || (record.type !== 'user' && record.type !== 'assistant')) {
+      continue;
+    }
+
+    const blocks = Array.isArray(record.message?.content)
+      ? record.message.content
+      : [];
+    const timestamp =
+      typeof record.timestamp === 'string' && record.timestamp
+        ? record.timestamp
+        : fallbackTimestamp;
+
+    if (record.type === 'assistant') {
+      const assistantParts = collectTextBlocks(blocks);
+      if (assistantParts.length > 0) {
+        entries.push({
+          timestamp,
+          role: 'assistant',
+          content: assistantParts.join('\n\n'),
+        });
+      }
+
+      for (const block of blocks) {
+        if (
+          block.type === 'tool_use' &&
+          typeof block.id === 'string' &&
+          typeof block.name === 'string'
+        ) {
+          pendingToolUses[block.id] = {
+            name: block.name,
+            input: block.input,
+            timestamp,
+          };
+        }
+      }
+
+      continue;
+    }
+
+    const userTextParts = blocks
+      .filter(
+        (block): block is ClaudeTranscriptContentBlock =>
+          block.type === 'text' && typeof block.text === 'string',
+      )
+      .map((block) => {
+        const text = block.text;
+        return typeof text === 'string' ? text.trim() : '';
+      })
+      .filter(Boolean);
+
+    if (userTextParts.length > 0) {
+      entries.push({
+        timestamp,
+        role: 'user',
+        content: userTextParts.join('\n\n'),
+      });
+    }
+
+    for (const block of blocks) {
+      if (
+        block.type !== 'tool_result' ||
+        typeof block.tool_use_id !== 'string'
+      ) {
+        continue;
+      }
+
+      const pending =
+        pendingToolUses[block.tool_use_id] || {
+          name: 'unknown_tool',
+          input: '(missing tool input)',
+          timestamp,
+        };
+
+      entries.push({
+        timestamp,
+        role: 'system',
+        content: buildToolEventContent(
+          pending.name,
+          pending.input,
+          block.content ?? '(no tool response)',
+        ),
+      });
+
+      delete pendingToolUses[block.tool_use_id];
+    }
+  }
+
+  return { entries, latestLineIndex };
+}
+
+/**
+ * Mirror Claude Code's official transcript into the plugin's internal
+ * session transcript so the worker can observe full user/assistant/tool flow.
+ */
+export function mirrorClaudeTranscript(
+  cwd: string,
+  sessionId: string,
+  transcriptPath: string,
+  log: LogFn = noopLog,
+): number {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+    return 0;
+  }
+
+  const stateLock = `${getSyncStateFile(cwd, sessionId)}.mirror.lock`;
+
+  return withProcessLock(
+    stateLock,
+    () => {
+      const sourceContent = fs.readFileSync(transcriptPath, 'utf-8').trim();
+      if (!sourceContent) {
+        return 0;
+      }
+
+      const lines = sourceContent.split('\n');
+      const state = loadSyncState(cwd, sessionId, log);
+      const previousLineIndex = state.lastMirroredTranscriptLine ?? -1;
+
+      if (previousLineIndex >= lines.length) {
+        state.lastMirroredTranscriptLine = -1;
+        state.pendingToolUses = {};
+      }
+
+      const pendingToolUses = { ...(state.pendingToolUses || {}) };
+      const { entries, latestLineIndex } = parseClaudeTranscriptEntries(
+        lines,
+        state.lastMirroredTranscriptLine ?? -1,
+        pendingToolUses,
+        new Date().toISOString(),
+        log,
+      );
+
+      if (entries.length > 0) {
+        ensureDurableStateDir(cwd);
+        const destinationPath = getContinuousTranscriptPath(cwd, sessionId);
+        const payload = entries
+          .map((entry) => JSON.stringify(entry))
+          .join('\n');
+        fs.appendFileSync(destinationPath, `${payload}\n`, 'utf-8');
+      }
+
+      state.lastMirroredTranscriptLine =
+        latestLineIndex >= 0 ? latestLineIndex : previousLineIndex;
+      state.pendingToolUses =
+        Object.keys(pendingToolUses).length > 0 ? pendingToolUses : undefined;
+      saveSyncState(cwd, state, log);
+
+      return entries.length;
+    },
+    {
+      log,
+      timeoutMs: 1500,
+      staleMs: 15000,
+    },
+  );
 }
 
 /**
