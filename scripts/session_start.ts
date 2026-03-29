@@ -11,93 +11,20 @@
  *   - hook_event_name: "SessionStart"
  */
 
-import * as os from 'os';
 import * as path from 'path';
-import {
-  readHookInputStrict,
-  createFileLogger,
-} from './framework/index.js';
-import {
-  getMode,
-  getTempStateDir,
-  getSdkToolsMode,
-  saveSyncState,
-  loadLocalMemory,
-  loadConfig,
-  ensureConfigFile,
-  ensureContinuousWorker,
-  syncClaudeMdFromMemory,
-  cleanSubNotesFromClaudeMd,
-} from './conversation_utils.js';
+import { createFileLogger } from './framework/index.js';
+import { getTempStateDir } from './conversation_utils.js';
+import { createSessionStartUseCase } from './application/composition/session-start-composition.js';
 
 // Configuration
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'session_start.log');
 const log = createFileLogger(LOG_FILE);
 
-interface SessionStartInput {
-  session_id: string;
-  cwd: string;
-  hook_event_name?: string;
-}
-
 async function main(): Promise<void> {
-  log('='.repeat(60));
-  log('session_start.ts started');
-
   try {
-    // Read hook input
-    log('Reading hook input from stdin...');
-    const hookInput = await readHookInputStrict<SessionStartInput>();
-    log(`Hook input: session_id=${hookInput.session_id}, cwd=${hookInput.cwd}`);
-
-    const mode = getMode(hookInput.cwd);
-    log(`Mode: ${mode}`);
-    if (mode === 'off') {
-      log('Mode is off, exiting');
-      process.exit(0);
-    }
-
-    // Initialize or load local memory, then project it into CLAUDE.md
-    const memoryBlocks = loadLocalMemory(hookInput.cwd, log);
-    syncClaudeMdFromMemory(hookInput.cwd, memoryBlocks);
-
-    // Ensure config.json exists with defaults and load config
-    ensureConfigFile(hookInput.cwd, log);
-    loadConfig(hookInput.cwd);  // Populate cache for downstream use
-
-    // Save initial session state
-    saveSyncState(
-      hookInput.cwd,
-      {
-        sessionId: hookInput.session_id,
-        lastProcessedIndex: -1,
-      },
-      log,
-    );
-
-    // Start the continuous worker (single execution model).
-    const sdkToolsMode = getSdkToolsMode(hookInput.cwd);
-    const worker = ensureContinuousWorker(
-      hookInput.session_id,
-      hookInput.cwd,
-      sdkToolsMode,
-      log,
-    );
-    if (worker) {
-      log(`Spawned continuous worker (PID: ${worker.pid})`);
-    } else {
-      log('Continuous worker already running');
-    }
-
-    const homeDir = process.env.HOME || os.homedir();
-    if (homeDir !== hookInput.cwd) {
-      log('Cleaning up legacy global ~/.claude/CLAUDE.md content...');
-      cleanSubNotesFromClaudeMd(homeDir);
-    }
-    log('Project CLAUDE.md synced from .subnotes');
-
-    log('Completed successfully');
+    const useCase = createSessionStartUseCase(log);
+    await useCase.execute();
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);

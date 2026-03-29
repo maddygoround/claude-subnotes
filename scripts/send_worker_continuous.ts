@@ -18,6 +18,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { getWorkerSdkToolsCapabilityLine } from './framework/utils/sdk-tools-mode.js';
 import {
   createFileLogger,
   runAgentLoop,
@@ -138,11 +139,19 @@ function formatTranscriptForAgent(entries: TranscriptEntry[]): string {
 
   const messages = entries
     .map((entry, idx) => {
-      const role = entry.role === 'user'
-        ? 'User'
-        : entry.role === 'assistant'
-          ? 'Claude Code'
-          : 'System';
+      let role = 'System';
+      switch (entry.role) {
+        case 'user':
+          role = 'User';
+          break;
+        case 'assistant':
+          role = 'Claude Code';
+          break;
+        case 'system':
+        default:
+          role = 'System';
+          break;
+      }
       return `<message index="${idx}" role="${role}" timestamp="${entry.timestamp}">\n${entry.content}\n</message>`;
     })
     .join('\n\n');
@@ -291,15 +300,26 @@ function parseForegroundDecision(response: string): ParsedForegroundDecision | n
       ? typeRaw
       : 'none';
   const show = showRaw === 'yes' || showRaw === 'true';
+  let fallbackScore = 18;
+  switch (type) {
+    case 'insight':
+      fallbackScore = 84;
+      break;
+    case 'steer':
+      fallbackScore = 72;
+      break;
+    case 'reflect':
+      fallbackScore = 62;
+      break;
+    case 'none':
+    default:
+      fallbackScore = 18;
+      break;
+  }
+
   const score = Number.isFinite(parsedScore)
     ? Math.max(0, Math.min(100, parsedScore))
-    : type === 'insight'
-      ? 84
-      : type === 'steer'
-        ? 72
-        : type === 'reflect'
-          ? 62
-          : 18;
+    : fallbackScore;
 
   return {
     show,
@@ -412,16 +432,6 @@ function buildWorkerForegroundDecision(
 // System Prompt
 // ============================================
 
-function getSdkToolsCapabilityLine(sdkToolsMode: SdkToolsMode): string {
-  if (sdkToolsMode === 'full') {
-    return 'Tool access mode: full (memory tools + local file reading tools).';
-  }
-  if (sdkToolsMode === 'off') {
-    return 'Tool access mode: off (no file-reading tools; memory tools only).';
-  }
-  return 'Tool access mode: read-only (memory tools + safe local file reading tools).';
-}
-
 function buildSystemPrompt(
   memoryBlocks: MemoryBlock[],
   cwd: string,
@@ -438,7 +448,7 @@ function buildSystemPrompt(
     `${basePrompt}\n\n` +
     `<runtime_context>\n` +
     `You are receiving incremental transcript updates between Claude tool calls and prompts.\n` +
-    `${getSdkToolsCapabilityLine(sdkToolsMode)}\n` +
+    `${getWorkerSdkToolsCapabilityLine(sdkToolsMode)}\n` +
     `You are the subconscious layer, not the foreground assistant.\n` +
     `Do not ask the user questions directly and do not invent visible subagents.\n` +
     `If clarification is needed, frame it as a suggestion for Claude Code or provide a fallback assumption.\n` +

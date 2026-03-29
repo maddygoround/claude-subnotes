@@ -9,7 +9,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getDurableStateDir, escapeXmlContent } from '../conversation_utils.js';
+import { getDurableStateDir } from '../conversation_utils.js';
+import { escapeXmlContent } from './utils/xml.js';
 import { updateJsonFile } from '../state_store.js';
 import type { InterventionRecord } from '../autonomic/types.js';
 import type { LogFn } from './hook-io.js';
@@ -383,15 +384,27 @@ function areNearDuplicateMessages(
 }
 
 function getTypePriority(type: AgentMessageType): number {
-  if (type === 'insight') return 3;
-  if (type === 'steer') return 2;
-  return 1;
+  switch (type) {
+    case 'insight':
+      return 3;
+    case 'steer':
+      return 2;
+    case 'reflect':
+    default:
+      return 1;
+  }
 }
 
 function getFallbackScore(type: AgentMessageType): number {
-  if (type === 'insight') return 62;
-  if (type === 'steer') return 54;
-  return 46;
+  switch (type) {
+    case 'insight':
+      return 62;
+    case 'steer':
+      return 54;
+    case 'reflect':
+    default:
+      return 46;
+  }
 }
 
 function getMessageScore(

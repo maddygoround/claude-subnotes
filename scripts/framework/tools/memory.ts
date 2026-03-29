@@ -170,109 +170,107 @@ function executeMemoryCommandTool(
 ): ToolExecutionResult {
   const command = String(input.command || '').trim().toLowerCase();
 
-  if (command === 'str_replace') {
-    return executeMemoryReplace(
-      {
-        label: input.path,
-        old_str: input.old_string,
-        new_str: input.new_string,
-      },
-      memoryBlocks,
-    );
-  }
-
-  if (command === 'insert') {
-    return executeMemoryInsert(
-      {
-        label: input.path,
-        new_str: input.insert_text,
-        insert_line: input.insert_line,
-      },
-      memoryBlocks,
-    );
-  }
-
-  if (command === 'create') {
-    return applyMemoryMutation(memoryBlocks, () => {
-      const label = parseLabel(input.path);
-      if (!label) {
-        throw new Error('memory create requires path');
-      }
-      if (memoryBlocks.some((b) => b.label === label)) {
-        throw new Error(`Block "${label}" already exists`);
-      }
-      memoryBlocks.push({
-        label,
-        description: String(input.description ?? '').trim(),
-        value: String(input.file_text ?? ''),
-      });
-      return {
-        result: `Successfully created ${label}`,
-        summary: `Created memory block ${label}`,
-        metadata: {
-          label,
-          operation: 'create',
+  switch (command) {
+    case 'str_replace':
+      return executeMemoryReplace(
+        {
+          label: input.path,
+          old_str: input.old_string,
+          new_str: input.new_string,
         },
-      };
-    });
-  }
+        memoryBlocks,
+      );
 
-  if (command === 'delete') {
-    return applyMemoryMutation(memoryBlocks, () => {
-      const label = parseLabel(input.path);
-      const idx = memoryBlocks.findIndex((b) => b.label === label);
-      if (idx < 0) {
-        throw new Error(`Block "${label}" not found`);
-      }
-      memoryBlocks.splice(idx, 1);
-      return {
-        result: `Successfully deleted ${label}`,
-        summary: `Deleted memory block ${label}`,
-        metadata: {
-          label,
-          operation: 'delete',
+    case 'insert':
+      return executeMemoryInsert(
+        {
+          label: input.path,
+          new_str: input.insert_text,
+          insert_line: input.insert_line,
         },
-      };
-    });
-  }
+        memoryBlocks,
+      );
 
-  if (command === 'rename') {
-    return applyMemoryMutation(memoryBlocks, () => {
-      const pathLabel = parseLabel(input.path);
-      const oldLabel = parseLabel(input.old_path) || pathLabel;
-      const newLabel = parseLabel(input.new_path);
-      const description = String(input.description ?? '').trim();
-
-      if (!oldLabel) {
-        throw new Error('memory rename requires old_path or path');
-      }
-      const block = findBlockOrThrow(memoryBlocks, oldLabel);
-
-      if (newLabel && newLabel !== oldLabel) {
-        if (memoryBlocks.some((b) => b.label === newLabel)) {
-          throw new Error(`Block "${newLabel}" already exists`);
+    case 'create':
+      return applyMemoryMutation(memoryBlocks, () => {
+        const label = parseLabel(input.path);
+        if (!label) {
+          throw new Error('memory create requires path');
         }
-        block.label = newLabel;
-      }
-      if (description) {
-        block.description = description;
-      }
+        if (memoryBlocks.some((b) => b.label === label)) {
+          throw new Error(`Block "${label}" already exists`);
+        }
+        memoryBlocks.push({
+          label,
+          description: String(input.description ?? '').trim(),
+          value: String(input.file_text ?? ''),
+        });
+        return {
+          result: `Successfully created ${label}`,
+          summary: `Created memory block ${label}`,
+          metadata: {
+            label,
+            operation: 'create',
+          },
+        };
+      });
 
-      const targetLabel =
-        newLabel && newLabel !== oldLabel ? `${oldLabel} -> ${newLabel}` : oldLabel;
+    case 'delete':
+      return applyMemoryMutation(memoryBlocks, () => {
+        const label = parseLabel(input.path);
+        const idx = memoryBlocks.findIndex((b) => b.label === label);
+        if (idx < 0) {
+          throw new Error(`Block "${label}" not found`);
+        }
+        memoryBlocks.splice(idx, 1);
+        return {
+          result: `Successfully deleted ${label}`,
+          summary: `Deleted memory block ${label}`,
+          metadata: {
+            label,
+            operation: 'delete',
+          },
+        };
+      });
 
-      return {
-        result: `Successfully updated ${targetLabel}`,
-        summary: `Renamed or updated memory block ${targetLabel}`,
-        metadata: {
-          label: newLabel || oldLabel,
-          operation: 'rename',
-        },
-      };
-    });
+    case 'rename':
+      return applyMemoryMutation(memoryBlocks, () => {
+        const pathLabel = parseLabel(input.path);
+        const oldLabel = parseLabel(input.old_path) || pathLabel;
+        const newLabel = parseLabel(input.new_path);
+        const description = String(input.description ?? '').trim();
+
+        if (!oldLabel) {
+          throw new Error('memory rename requires old_path or path');
+        }
+        const block = findBlockOrThrow(memoryBlocks, oldLabel);
+
+        if (newLabel && newLabel !== oldLabel) {
+          if (memoryBlocks.some((b) => b.label === newLabel)) {
+            throw new Error(`Block "${newLabel}" already exists`);
+          }
+          block.label = newLabel;
+        }
+        if (description) {
+          block.description = description;
+        }
+
+        const targetLabel =
+          newLabel && newLabel !== oldLabel ? `${oldLabel} -> ${newLabel}` : oldLabel;
+
+        return {
+          result: `Successfully updated ${targetLabel}`,
+          summary: `Renamed or updated memory block ${targetLabel}`,
+          metadata: {
+            label: newLabel || oldLabel,
+            operation: 'rename',
+          },
+        };
+      });
+
+    default:
+      throw new Error(`Unsupported memory command: ${command}`);
   }
-
-  throw new Error(`Unsupported memory command: ${command}`);
 }
 
 const memoryToolDefinition = defineTool({

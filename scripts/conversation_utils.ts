@@ -14,6 +14,18 @@ import {
   writeJsonFileAtomic,
   withProcessLock,
 } from './state_store.js';
+import {
+  getStdoutSdkToolsCapabilityLine,
+  parseSdkToolsMode,
+  parseSubNotesMode,
+} from './framework/utils/sdk-tools-mode.js';
+import {
+  escapeRegex,
+  escapeXmlAttribute,
+  escapeXmlContent,
+} from './framework/utils/xml.js';
+
+export { escapeRegex, escapeXmlAttribute, escapeXmlContent };
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -163,8 +175,8 @@ export function loadConfig(cwd: string): ReflectConfig {
   }
 
   const config: ReflectConfig = {
-    mode: parseMode(fileData.mode),
-    sdkToolsMode: parseSdkTools(fileData.sdkToolsMode),
+    mode: parseSubNotesMode(fileData.mode),
+    sdkToolsMode: parseSdkToolsMode(fileData.sdkToolsMode),
     architecture: fileData.architecture === 'oneshot' ? 'oneshot' : 'continuous',
     autonomic: fileData.autonomic !== false,
     debug: fileData.debug === true,
@@ -207,22 +219,6 @@ export function loadConfig(cwd: string): ReflectConfig {
   _configCache = config;
   _configCacheDir = cwd;
   return config;
-}
-
-function parseMode(value: unknown): SubNotesMode {
-  if (typeof value === 'string') {
-    const v = value.toLowerCase();
-    if (v === 'full' || v === 'off') return v;
-  }
-  return 'whisper';
-}
-
-function parseSdkTools(value: unknown): SdkToolsMode {
-  if (typeof value === 'string') {
-    const v = value.toLowerCase();
-    if (v === 'full' || v === 'off') return v as SdkToolsMode;
-  }
-  return 'read-only';
 }
 
 function parsePositiveInt(value: unknown, fallback: number): number {
@@ -1066,31 +1062,6 @@ export function saveLocalMemory(
 }
 
 // ============================================
-// XML Escaping Utilities
-// ============================================
-
-export function escapeXmlAttribute(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, ' ');
-}
-
-export function escapeXmlContent(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-export function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// ============================================
 // CLAUDE.md Formatting and Writing
 // ============================================
 
@@ -1514,11 +1485,7 @@ export function formatAllBlocksForStdout(
   cwd?: string,
 ): string {
   const sdkToolsMode = getSdkToolsMode(cwd);
-  const capabilityLine = sdkToolsMode === 'full'
-    ? 'It can read files, search the web, and make changes to your codebase.'
-    : sdkToolsMode === 'read-only'
-      ? 'It can read files, search your codebase, and browse the web (read-only).'
-      : 'It operates in listen-only mode (memory updates only).';
+  const capabilityLine = getStdoutSdkToolsCapabilityLine(sdkToolsMode);
 
   const header = `<subnotes_context>
 Notes agent is active and observing this session.

@@ -25,6 +25,10 @@ import type {
   LogFn,
 } from '../autonomic/types.js';
 import { createDefaultSentinelState } from '../autonomic/types.js';
+import {
+  extractFilePathsFromToolInput,
+  STANDARD_FILE_PATH_FIELDS,
+} from './utils/file-paths.js';
 
 import { ReflectConfig } from '../conversation_utils.js';
 
@@ -106,26 +110,6 @@ export function cleanupSentinelState(sessionId: string): void {
 // ============================================
 // State Update
 // ============================================
-
-/**
- * Extract file paths from tool input.
- */
-function extractFilePaths(toolName: string, toolInput: unknown): string[] {
-  if (!toolInput || typeof toolInput !== 'object') return [];
-
-  const input = toolInput as Record<string, unknown>;
-  const paths: string[] = [];
-
-  // Common field names for file paths across tools
-  const fileFields = ['file_path', 'filePath', 'path', 'TargetFile', 'AbsolutePath'];
-  for (const field of fileFields) {
-    if (typeof input[field] === 'string') {
-      paths.push(input[field] as string);
-    }
-  }
-
-  return paths;
-}
 
 /**
  * Check if a tool call represents a test run.
@@ -234,7 +218,10 @@ export function updateSentinelState(
 
   // 1. Track file edits
   if (FILE_EDIT_TOOLS.some((t) => toolName.includes(t))) {
-    const files = extractFilePaths(toolName, toolInput);
+    const files = extractFilePathsFromToolInput(
+      toolInput,
+      STANDARD_FILE_PATH_FIELDS,
+    );
     for (const filePath of files) {
       const existing = updated.file_edit_counts[filePath];
       if (existing && now - existing.first < config.sentinelThrashingWindowMs) {
@@ -255,7 +242,10 @@ export function updateSentinelState(
 
   // 2. Track file creations (for overwrite detection)
   if (FILE_CREATE_TOOLS.some((t) => toolName.includes(t))) {
-    const files = extractFilePaths(toolName, toolInput);
+    const files = extractFilePathsFromToolInput(
+      toolInput,
+      STANDARD_FILE_PATH_FIELDS,
+    );
     for (const filePath of files) {
       if (!updated.recent_files_created[filePath]) {
         updated.recent_files_created[filePath] = { created_at: now };
@@ -405,7 +395,10 @@ export function checkSentinelTriggers(
     FILE_CREATE_TOOLS.some((t) => currentToolName.includes(t)) &&
     currentToolInput
   ) {
-    const files = extractFilePaths(currentToolName, currentToolInput);
+    const files = extractFilePathsFromToolInput(
+      currentToolInput,
+      STANDARD_FILE_PATH_FIELDS,
+    );
     for (const filePath of files) {
       const creation = state.recent_files_created[filePath];
       if (

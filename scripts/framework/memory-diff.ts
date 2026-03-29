@@ -5,7 +5,8 @@
  * Used by pretool_sync.ts and sync_local_memory.ts.
  */
 
-import { MemoryBlock, escapeXmlContent } from '../conversation_utils.js';
+import { MemoryBlock } from '../conversation_utils.js';
+import { escapeXmlContent } from './utils/xml.js';
 
 // ============================================
 // Change Detection

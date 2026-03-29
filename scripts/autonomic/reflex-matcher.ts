@@ -13,39 +13,12 @@ import type {
   LogFn,
 } from './types.js';
 import { simpleGlobMatch } from './crystallizer.js';
+import {
+  extractFilePathsFromToolInput,
+  EXTENDED_FILE_PATH_FIELDS,
+} from '../framework/utils/file-paths.js';
 
 const noopLog: LogFn = () => {};
-
-// ============================================
-// Tool Input Parsing
-// ============================================
-
-/**
- * Extract file paths from tool input for pattern matching.
- */
-function extractFilePaths(toolInput: unknown): string[] {
-  if (!toolInput || typeof toolInput !== 'object') return [];
-
-  const input = toolInput as Record<string, unknown>;
-  const paths: string[] = [];
-
-  const fileFields = [
-    'file_path',
-    'filePath',
-    'path',
-    'TargetFile',
-    'AbsolutePath',
-    'SearchPath',
-  ];
-
-  for (const field of fileFields) {
-    if (typeof input[field] === 'string') {
-      paths.push(input[field] as string);
-    }
-  }
-
-  return paths;
-}
 
 // ============================================
 // Rule Matching
@@ -78,7 +51,10 @@ function matchFilePattern(
 ): boolean {
   if (!rulePattern) return true; // No file pattern = match everything
 
-  const filePaths = extractFilePaths(toolInput);
+  const filePaths = extractFilePathsFromToolInput(
+    toolInput,
+    EXTENDED_FILE_PATH_FIELDS,
+  );
   if (filePaths.length === 0) return true; // No files to check = match
 
   return filePaths.some((fp) => simpleGlobMatch(rulePattern, fp));
