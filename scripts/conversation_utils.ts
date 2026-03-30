@@ -3,36 +3,15 @@
  * Used by hook scripts and background workers.
  */
 
+import type { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
-import {
-  readJsonFileWithFallback,
-  writeJsonFileAtomic,
-  withProcessLock,
-} from './state_store.js';
-import { getStdoutSdkToolsCapabilityLine } from './framework/utils/sdk-tools-mode.js';
-import {
-  escapeRegex,
-  escapeXmlAttribute,
-  escapeXmlContent,
-} from './framework/utils/xml.js';
-import {
-  cloneMemoryBlock,
-  cloneMemoryBlocks,
-  coerceMemoryBlocks,
-  mergeMemoryBlocks,
-  parseSyncStateData,
-} from './framework/utils/conversation-state.js';
-import { isProcessRunning } from './framework/utils/process.js';
-import { readPidFromFile } from './framework/utils/pid.js';
-import { parseClaudeTranscriptEntries } from './framework/utils/transcript-parser.js';
 import {
   CLAUDE_MD_PATH,
   ROOT_CLAUDE_MD_PATH,
-  SUBNOTES_SECTION_START,
   SUBNOTES_SECTION_END,
+  SUBNOTES_SECTION_START,
   cleanSubNotesFromClaudeMd,
   formatDistilledClaudeMd,
   formatMemoryBlocksAsXml,
@@ -61,37 +40,37 @@ import {
   getSyncStateFile,
 } from './conversation-utils/state-paths.js';
 import { spawnSilentWorker } from './conversation-utils/worker-spawn.js';
+import {
+  cloneMemoryBlocks,
+  coerceMemoryBlocks,
+  mergeMemoryBlocks,
+  parseSyncStateData
+} from './framework/utils/conversation-state.js';
+import { readPidFromFile } from './framework/utils/pid.js';
+import { isProcessRunning } from './framework/utils/process.js';
+import { getStdoutSdkToolsCapabilityLine } from './framework/utils/sdk-tools-mode.js';
+import { parseClaudeTranscriptEntries } from './framework/utils/transcript-parser.js';
+import {
+  escapeRegex,
+  escapeXmlAttribute,
+  escapeXmlContent,
+} from './framework/utils/xml.js';
+import {
+  readJsonFileWithFallback,
+  withProcessLock,
+  writeJsonFileAtomic,
+} from './state_store.js';
 
-export { escapeRegex, escapeXmlAttribute, escapeXmlContent };
 export {
   CLAUDE_MD_PATH,
-  ROOT_CLAUDE_MD_PATH,
-  SUBNOTES_SECTION_START,
-  SUBNOTES_SECTION_END,
-  cleanSubNotesFromClaudeMd,
-  formatDistilledClaudeMd,
-  formatMemoryBlocksAsXml,
-  updateClaudeMd,
-};
-export {
-  SDK_TOOLS_BLOCKED,
-  SDK_TOOLS_READ_ONLY,
-  ensureConfigFile,
-  getMode,
-  getSdkToolsMode,
-  getTempStateDir,
+  ROOT_CLAUDE_MD_PATH, SDK_TOOLS_BLOCKED,
+  SDK_TOOLS_READ_ONLY, SUBNOTES_SECTION_END, SUBNOTES_SECTION_START, cleanSubNotesFromClaudeMd, ensureConfigFile, ensureDurableStateDir, escapeRegex, escapeXmlAttribute, escapeXmlContent, formatDistilledClaudeMd,
+  formatMemoryBlocksAsXml, getDurableStateDir,
+  getMemoryFile, getMode, getRepoNamespace, getSdkToolsMode, getSyncStateFile, getTempStateDir,
   invalidateConfigCache,
   isAutonomicEnabled,
-  loadConfig,
+  loadConfig, spawnSilentWorker, updateClaudeMd
 };
-export {
-  ensureDurableStateDir,
-  getDurableStateDir,
-  getMemoryFile,
-  getRepoNamespace,
-  getSyncStateFile,
-};
-export { spawnSilentWorker };
 export type { ReflectConfig, SdkToolsMode, SubNotesMode };
 
 // ESM-compatible __dirname
@@ -125,7 +104,7 @@ export interface MemoryBlock {
 }
 
 export type LogFn = (message: string) => void;
-const noopLog: LogFn = () => {};
+const noopLog: LogFn = () => { };
 const SUBCONSCIOUS_AF_PATH = 'Subconscious.af';
 
 interface SubconsciousTemplate {

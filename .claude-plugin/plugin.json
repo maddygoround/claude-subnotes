@@ -1,6 +1,6 @@
 {
   "name": "claude-reflect",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Claude's SubNotes - A persistent memory agent for Claude Code. Watches your sessions, learns your patterns, and whispers guidance back.",
   "author": {
     "name": "maddygoround",
