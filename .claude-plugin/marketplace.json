@@ -1,5 +1,7 @@
 {
   "name": "claude-reflect",
+  "description": "Claude Reflect is a background agent that watches Claude Code sessions, reads the codebase, and builds memory over time. It receives transcripts asynchronously and builds long-term context.",
+  "category": "productivity",
   "owner": {
     "name": "maddygoround",
     "url": "https://github.com/maddygoround"
